@@ -1,0 +1,27 @@
+[package]
+name = "rockets-engine"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+authors = ["Alex Jokela <email@tinycomputers.io>"]
+description = "Point-mass powered flight with ballistics-engine forces and guidance hooks"
+license = "MIT"
+publish = false
+
+[features]
+default = ["ballistics", "serde"]
+ballistics = ["dep:ballistics-engine"]
+serde = ["dep:serde", "nalgebra/serde-serialize"]
+
+[dependencies]
+# Consume the sibling engine read-only; no fork or upstream changes are needed.
+ballistics-engine = { path = "../ballistics-engine", version = "=0.48.0", default-features = false, optional = true }
+nalgebra = { version = "0.35", default-features = false, features = ["std"] }
+serde = { version = "1.0", features = ["derive"], optional = true }
+
+[dev-dependencies]
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
+
+[[example]]
+name = "boost_coast"
+required-features = ["ballistics"]
