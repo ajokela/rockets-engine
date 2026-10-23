@@ -119,6 +119,8 @@
     <li><b>Discontinuity-aware RK4</b> — ignition, curve knots, separations and burnout split the integration grid; one-sided forces at every event.</li>
     <li><b>Guidance hooks</b> — application-owned controllers called once per public step; the integrator holds the command constant across substeps.</li>
     <li><b>Real force models</b> — ballistics-engine gravity, drag and ICAO atmosphere; central (inverse-square) gravity and altitude switching for planet-scale ECI arcs.</li>
+    <li><b>Modified point-mass</b> — opt-in Magnus/yaw-of-repose spin, Coriolis and rail tip-off, plus angle-of-attack body lift and induced drag. No attitude integration required.</li>
+    <li><b>CLI &amp; browser terminal</b> — <code>cargo install rockets-engine --features cli</code> for the <code>rockets</code> tool, or fly it in <a href="/sh/" style="color:var(--accent2)">the browser terminal</a>; one shared parser, native and WASM.</li>
     <li><b>SI throughout</b> — metres, seconds, kilograms, newtons. Simulation time in, state out; the solver owns no evolving state.</li>
   </ul>
 
