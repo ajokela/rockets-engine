@@ -6,7 +6,12 @@ rust-version = "1.89"
 authors = ["Alex Jokela <email@tinycomputers.io>"]
 description = "Point-mass powered flight with ballistics-engine forces and guidance hooks"
 license = "MIT"
-publish = false
+repository = "https://github.com/ajokela/rockets-engine"
+homepage = "https://github.com/ajokela/rockets-engine"
+documentation = "https://docs.rs/rockets-engine"
+readme = "README.md"
+keywords = ["rocket", "ballistics", "trajectory", "physics", "simulation"]
+categories = ["science", "simulation"]
 
 [features]
 default = ["ballistics", "serde"]
@@ -14,8 +19,7 @@ ballistics = ["dep:ballistics-engine"]
 serde = ["dep:serde", "nalgebra/serde-serialize"]
 
 [dependencies]
-# Consume the sibling engine read-only; no fork or upstream changes are needed.
-ballistics-engine = { path = "../ballistics-engine", version = "=0.48.0", default-features = false, optional = true }
+ballistics-engine = { version = "=0.48.0", default-features = false, optional = true }
 nalgebra = { version = "0.35", default-features = false, features = ["std"] }
 serde = { version = "1.0", features = ["derive"], optional = true }
 

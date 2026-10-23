@@ -1,13 +1,19 @@
 # rockets-engine
 
-A Rust companion to `ballistics-engine` for powered, three-dimensional point-mass flight. It adds prescribed motor burns, changing mass, incremental RK4 integration and application-owned guidance hooks. The default adapter calls the existing ballistics-engine gravity/drag derivative function; it does not fork or modify that engine.
+A Rust companion to [`ballistics-engine`](https://crates.io/crates/ballistics-engine) for powered, three-dimensional point-mass flight. It adds prescribed motor burns, changing mass, incremental RK4 integration and application-owned guidance hooks. The default adapter calls the existing ballistics-engine gravity/drag derivative function; it does not fork or modify that engine.
 
-The crate lives beside `../ballistics-engine` and currently consumes version 0.48.0 through a local path dependency. It is not published to crates.io. Rust 1.99.1 is pinned for development, matching the game workspace.
+The crate is published on crates.io and consumes `ballistics-engine` 0.48.0 from crates.io. Rust 1.99.1 is pinned for development, matching the game workspace.
+
+## Use
+
+```toml
+[dependencies]
+rockets-engine = "0.1"
+```
 
 ## Run
 
 ```sh
-cd ~/projects/rockets-engine
 cargo test --locked --all-features
 cargo run --locked --example boost_coast
 cargo run --locked --example guidance_hook
@@ -119,6 +125,6 @@ cargo test --locked --no-default-features --features ballistics
 cargo test --locked --no-default-features --features serde
 ```
 
-`ballistics` enables the companion adapter and local engine dependency. `serde` enables snapshot serialization. Disabling both leaves the integrator, motor, guidance and custom force hooks usable on their own. Cargo still needs the sibling manifest to resolve the optional path dependency in this checkout.
+`ballistics` enables the companion adapter and its `ballistics-engine` dependency. `serde` enables snapshot serialization. Disabling both leaves the integrator, motor, guidance and custom force hooks usable on their own.
 
 Licensed under MIT; see the repository's `LICENSE` file.

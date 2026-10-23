@@ -29,6 +29,8 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "ballistics-engine"
 version = "0.48.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9107a91d1664aa5cf4f56244ab5ce7baa07ed37a427bad2a335ad849b2cb8a03"
 dependencies = [
  "getrandom",
  "js-sys",
@@ -66,9 +68,9 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "cc"
-version = "1.9.0"
+version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "877bf67ac8e52449eb2f9e98a344ea163beb70dd1f9eebe3cc5357dcfeaee4df"
+checksum = "86e055fa6e3e40ad6187ba25b6855eeb635d5271f8e0f0e1e9a5826b8d75bea0"
 dependencies = [
  "find-msvc-tools",
  "shlex",
