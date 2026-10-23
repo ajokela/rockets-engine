@@ -84,6 +84,9 @@ fn help() -> String {
      \x20 --twist-left             roll left-handed instead of right\n\
      \x20 --coriolis <lat,az>      launch latitude° and bearing° (0=north)\n\
      \x20 --tipoff <yaw,decay>     rail tip-off yaw in rad, decay length in m\n\
+     \x20 --cna <mach:cna,...>     normal-force slope per radian vs Mach;\n\
+     \x20                            body lift from angle of attack (needs --lift-k)\n\
+     \x20 --lift-k <mach:k,...>     induced drag factor k (Cd += k·α²) vs Mach\n\
      \n\
      EXAMPLE\n\
      \x20 simulate --curve 0:0,0.1:20,0.9:15,1:0 --dry-mass 0.18 \\\n\
@@ -120,6 +123,10 @@ struct Options {
     coriolis: Option<(f64, f64)>,
     #[cfg(feature = "ballistics")]
     tipoff: Option<(f64, f64)>,
+    #[cfg(feature = "ballistics")]
+    cna: Option<Vec<(f64, f64)>>,
+    #[cfg(feature = "ballistics")]
+    lift_k: Option<Vec<(f64, f64)>>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -197,6 +204,10 @@ fn simulate(args: &[String]) -> Result<String, String> {
     let mut coriolis = None;
     #[cfg(feature = "ballistics")]
     let mut tipoff = None;
+    #[cfg(feature = "ballistics")]
+    let mut cna = None;
+    #[cfg(feature = "ballistics")]
+    let mut lift_k = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -267,6 +278,10 @@ fn simulate(args: &[String]) -> Result<String, String> {
                 }
                 tipoff = Some(pairs[0]);
             }
+            #[cfg(feature = "ballistics")]
+            "--cna" => cna = Some(parse_pairs(&value(flag)?, "cna")?),
+            #[cfg(feature = "ballistics")]
+            "--lift-k" => lift_k = Some(parse_pairs(&value(flag)?, "lift-k")?),
             other => return Err(format!("error: unknown option '{other}'")),
         }
         i += 1;
@@ -305,6 +320,10 @@ fn simulate(args: &[String]) -> Result<String, String> {
         coriolis,
         #[cfg(feature = "ballistics")]
         tipoff,
+        #[cfg(feature = "ballistics")]
+        cna,
+        #[cfg(feature = "ballistics")]
+        lift_k,
     };
     fly(&opts)
 }
@@ -341,7 +360,9 @@ fn fly(opts: &Options) -> Result<String, String> {
         || opts.body_length_m.is_some()
         || opts.twist_left
         || opts.coriolis.is_some()
-        || opts.tipoff.is_some();
+        || opts.tipoff.is_some()
+        || opts.cna.is_some()
+        || opts.lift_k.is_some();
     #[cfg(feature = "ballistics")]
     if wants_mpm && !use_drag {
         return Err(
@@ -391,6 +412,15 @@ fn fly(opts: &Options) -> Result<String, String> {
         if let Some((yaw, decay)) = opts.tipoff {
             forces = forces
                 .with_tipoff_yaw(yaw, decay)
+                .map_err(|e| format!("error: {e}"))?;
+        }
+        if opts.cna.is_some() || opts.lift_k.is_some() {
+            let (cna, k) = match (opts.cna.clone(), opts.lift_k.clone()) {
+                (Some(c), Some(k)) => (c, k),
+                _ => return Err("error: body lift needs both --cna and --lift-k".to_string()),
+            };
+            forces = forces
+                .with_body_lift(cna, k)
                 .map_err(|e| format!("error: {e}"))?;
         }
         let sim = Simulator::new(rocket, forces, settings).map_err(|e| format!("error: {e}"))?;
@@ -688,5 +718,28 @@ mod tests {
         .unwrap();
         assert!(out.contains("burning"));
         assert!(out.contains("substeps"));
+    }
+
+    #[cfg(feature = "ballistics")]
+    #[test]
+    fn body_lift_needs_both_tables() {
+        let err = run(&argv(&format!(
+            "simulate --curve 0:0,0.5:200,1:0 --dry-mass 0.3 --propellant-mass 0.05 \
+             --duration-s 0.2 {DRAG} --cna 0:2,1:3"
+        )))
+        .unwrap_err();
+        assert!(err.contains("--cna and --lift-k"));
+    }
+
+    #[cfg(feature = "ballistics")]
+    #[test]
+    fn body_lift_run_flies() {
+        let out = run(&argv(&format!(
+            "simulate --curve 0:0,0.5:200,1:0 --dry-mass 0.3 --propellant-mass 0.05 \
+             --duration-s 1.0 --dt-s 0.25 --elevation-deg 60 --speed-mps 50 \
+             {DRAG} --cna 0:2,1:3,3:4 --lift-k 0:0,1:0.5,3:1"
+        )))
+        .unwrap();
+        assert!(out.contains("burning"));
     }
 }

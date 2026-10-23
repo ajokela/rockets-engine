@@ -8,7 +8,7 @@ The crate is published on crates.io and consumes `ballistics-engine` 0.48.0 from
 
 ```toml
 [dependencies]
-rockets-engine = "0.3"
+rockets-engine = "0.4"
 ```
 
 ## Run
@@ -126,6 +126,15 @@ The atmospheric adapter uses the body's own Cd-versus-Mach curve and updates bot
 - `with_tipoff_yaw(yaw_rad, decay_distance_m)` — rail tip-off: an initial yaw decaying exponentially with downrange distance, perturbing the early angle of attack.
 
 The CLI exposes the same surface: `--twist-in`/`--body-length-m`/`--twist-left`, `--coriolis lat:az`, `--tipoff yaw:decay`.
+
+### Angle-of-attack aerodynamics
+
+`with_body_lift(cna_vs_mach, induced_k_vs_mach)` adds quasi-static body lift without integrating attitude. The solver now hands every RK stage's commanded thrust axis to the force model through `ForceModel::acceleration_with_axis` (a provided method — orientation-blind models are bit-identical and existing implementations keep working). The adapter measures the angle of attack between that axis and the wind-relative velocity and adds:
+
+- **Normal force** `N = q·A·Cnα(Mach)·α`, perpendicular to the relative wind on the axis side — a guided turn at angle of attack turns harder because the airframe works.
+- **Induced drag** `Cd += k(Mach)·α²` — the same turn costs speed.
+
+`Cnα` is per radian (body + fins), `k` per radian squared; both are piecewise-linear Mach tables needing two or more ascending points. Reference area derives from the diameter. CLI: `--cna mach:cna,... --lift-k mach:k,...`. This is still prescribed-attitude point-mass — the axis is commanded, not earned; trim, weathercock lag and stability margins belong to a future reduced-order layer.
 
 The upstream ICAO atmosphere is defined to about 80 km; do not fly `BallisticForces` above it. Wrap it in `AltitudeSwitch` with a vacuum model above a cutoff (`UniformGravity` for flat-frame flight, `CentralGravity` for Earth-centered arcs) when a trajectory leaves the atmosphere.
 

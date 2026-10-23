@@ -33,6 +33,19 @@ impl FlightState {
 pub trait ForceModel {
     /// Acceleration in world-frame metres per second squared.
     fn acceleration(&self, state: &FlightState, mass_kg: f64) -> Result<Vec3>;
+
+    /// Acceleration when the commanded body axis is known, for angle-of-attack-aware
+    /// models (body lift, induced drag). `body_axis` is the solver-resolved unit
+    /// thrust axis at this stage. The default ignores the axis, which keeps every
+    /// orientation-blind model (gravity, plain drag) bit-identical.
+    fn acceleration_with_axis(
+        &self,
+        state: &FlightState,
+        mass_kg: f64,
+        _body_axis: Vec3,
+    ) -> Result<Vec3> {
+        self.acceleration(state, mass_kg)
+    }
 }
 
 impl<F> ForceModel for F
@@ -376,8 +389,9 @@ impl<E: ForceModel> Simulator<E> {
             .map_err(|_| Error::NumericalFailure("non-finite intermediate state"))?;
         let mass = self.rocket.interval_mass(state.time_s, stages);
         let thrust = self.rocket.interval_thrust(state.time_s, stages);
-        let acceleration =
-            self.forces.acceleration(&state, mass)? + axis * (thrust / mass) + steering;
+        let acceleration = self.forces.acceleration_with_axis(&state, mass, axis)?
+            + axis * (thrust / mass)
+            + steering;
         if !finite_vec(&acceleration) {
             return Err(Error::NumericalFailure("non-finite acceleration"));
         }

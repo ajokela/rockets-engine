@@ -98,8 +98,20 @@ impl Atmosphere {
 pub struct BallisticForces {
     inputs: BallisticInputs,
     atmos_params: (f64, f64, f64, f64),
+    atmosphere: Atmosphere,
     wind_mps: Vec3,
     omega_rps: Option<Vec3>,
+    body_lift: Option<BodyLift>,
+}
+
+/// Validated angle-of-attack aerodynamics: normal-force slope and induced-drag
+/// factor, each piecewise-linear in Mach via the upstream table type.
+#[derive(Debug, Clone)]
+struct BodyLift {
+    /// Normal force coefficient slope per radian of angle of attack, vs Mach.
+    cna_per_rad: DragTable,
+    /// Induced drag increment per radian squared (Cd += k·α²), vs Mach.
+    induced_k_per_rad2: DragTable,
 }
 
 /// Earth rotation rate, rad/s (McCoy-level precision, matching the upstream kernel).
@@ -141,8 +153,10 @@ impl BallisticForces {
         Ok(Self {
             inputs,
             atmos_params: atmosphere.parameters()?,
+            atmosphere,
             wind_mps,
             omega_rps: None,
+            body_lift: None,
         })
     }
 
@@ -238,6 +252,126 @@ impl BallisticForces {
         Ok(self)
     }
 
+    /// Angle-of-attack aerodynamics without attitude integration: a quasi-static
+    /// normal force and induced drag from the commanded axis's angle to the
+    /// relative wind.
+    ///
+    /// `cna_vs_mach` is the normal-force coefficient slope per radian of angle of
+    /// attack (body + fins) versus Mach; `induced_k_vs_mach` adds Cd += k·α².
+    /// Both need at least two strictly ascending Mach points and nonnegative,
+    /// finite values. The angle of attack is measured each RK stage between the
+    /// solver-resolved thrust axis and the wind-relative velocity, so a guided
+    /// turn at angle of attack both turns harder (body lift) and pays drag for it.
+    /// Reference area derives from the diameter passed to [`Self::new`].
+    pub fn with_body_lift(
+        mut self,
+        cna_vs_mach: Vec<(f64, f64)>,
+        induced_k_vs_mach: Vec<(f64, f64)>,
+    ) -> Result<Self> {
+        let table = |pairs: Vec<(f64, f64)>, name: &'static str| -> Result<DragTable> {
+            if pairs.len() < 2 {
+                return Err(Error::invalid(name, "needs at least two Mach points"));
+            }
+            for (i, (mach, value)) in pairs.iter().enumerate() {
+                if !mach.is_finite() || *mach < 0.0 {
+                    return Err(Error::invalid(name, "Mach must be finite and nonnegative"));
+                }
+                if i > 0 && *mach <= pairs[i - 1].0 {
+                    return Err(Error::invalid(name, "Mach must strictly ascend"));
+                }
+                if !value.is_finite() || *value < 0.0 {
+                    return Err(Error::invalid(
+                        name,
+                        "values must be finite and nonnegative",
+                    ));
+                }
+            }
+            let (mach_values, cd_values) = pairs.into_iter().unzip();
+            Ok(DragTable::new(mach_values, cd_values))
+        };
+        self.body_lift = Some(BodyLift {
+            cna_per_rad: table(cna_vs_mach, "cna_vs_mach")?,
+            induced_k_per_rad2: table(induced_k_vs_mach, "induced_k_vs_mach")?,
+        });
+        Ok(self)
+    }
+
+    /// Local air density (kg/m³) and sound speed (m/s) at a geometric altitude,
+    /// consistent with the atmosphere handed to the kernel.
+    fn local_air(&self, altitude_m: f64) -> (f64, f64) {
+        match self.atmosphere {
+            Atmosphere::Standard { .. } => {
+                let (base_alt, temp_c, press_hpa, ratio) = self.atmos_params;
+                ballistics_engine::atmosphere::get_local_atmosphere(
+                    altitude_m, base_alt, temp_c, press_hpa, ratio,
+                )
+            }
+            Atmosphere::Uniform { .. } => {
+                let (density, speed_of_sound, _, _) = self.atmos_params;
+                (density, speed_of_sound)
+            }
+        }
+    }
+
+    /// Quasi-static AoA force increment: normal force toward the body-axis side of
+    /// the velocity, plus induced drag along it. Zero when aligned or in still air.
+    fn body_lift_accel(
+        &self,
+        state: &FlightState,
+        mass_kg: f64,
+        wind_mps: Vec3,
+        body_axis: Vec3,
+    ) -> Result<Vec3> {
+        let Some(lift) = &self.body_lift else {
+            return Ok(Vec3::zeros());
+        };
+        let v_air = state.velocity_mps - wind_mps;
+        let speed = v_air.norm();
+        // Degenerate cases: no relative wind, or a zero/ill-posed axis → no increment.
+        if speed < 1e-12 || body_axis.amax() == 0.0 {
+            return Ok(Vec3::zeros());
+        }
+        let v_hat = v_air / speed;
+        let axis = body_axis / body_axis.norm();
+        // Angle of attack from the axis to the relative wind.
+        let perp = axis - axis.dot(&v_hat) * v_hat;
+        let sin_alpha = perp.norm();
+        let cos_alpha = axis.dot(&v_hat).clamp(-1.0, 1.0);
+        let alpha = sin_alpha.atan2(cos_alpha);
+        if alpha < 1e-12 {
+            return Ok(Vec3::zeros());
+        }
+        let (rho, sound) = self.local_air(state.position_m.y);
+        if rho <= 0.0 || sound <= 0.0 {
+            return Ok(Vec3::zeros());
+        }
+        let mach = speed / sound;
+        let q = 0.5 * rho * speed * speed;
+        let area = std::f64::consts::FRAC_PI_4 * self.inputs.bullet_diameter.powi(2);
+        let normal_force = q * area * lift.cna_per_rad.interpolate(mach) * alpha;
+        let induced_drag = q * area * lift.induced_k_per_rad2.interpolate(mach) * alpha * alpha;
+        let accel = (normal_force * (perp / sin_alpha) - induced_drag * v_hat) / mass_kg;
+        if !finite_vec(&accel) {
+            return Err(Error::NumericalFailure(
+                "body lift returned non-finite acceleration",
+            ));
+        }
+        Ok(accel)
+    }
+
+    /// Axis-aware counterpart to [`Self::acceleration_in_wind`], for wrappers that
+    /// sample their own wind but want the body-lift increment.
+    pub fn acceleration_with_axis_in_wind(
+        &self,
+        state: &FlightState,
+        mass_kg: f64,
+        wind_mps: Vec3,
+        body_axis: Vec3,
+    ) -> Result<Vec3> {
+        let base = self.acceleration_in_wind(state, mass_kg, wind_mps)?;
+        Ok(base + self.body_lift_accel(state, mass_kg, wind_mps, body_axis)?)
+    }
+
     /// Evaluate using externally sampled wind, for a spatial or time-varying force wrapper.
     pub fn acceleration_in_wind(
         &self,
@@ -278,5 +412,14 @@ impl BallisticForces {
 impl ForceModel for BallisticForces {
     fn acceleration(&self, state: &FlightState, mass_kg: f64) -> Result<Vec3> {
         self.acceleration_in_wind(state, mass_kg, self.wind_mps)
+    }
+
+    fn acceleration_with_axis(
+        &self,
+        state: &FlightState,
+        mass_kg: f64,
+        body_axis: Vec3,
+    ) -> Result<Vec3> {
+        self.acceleration_with_axis_in_wind(state, mass_kg, self.wind_mps, body_axis)
     }
 }
