@@ -14,16 +14,21 @@
 //!
 //! See the README and `examples/boost_coast.rs` for integration and model assumptions.
 
-#![forbid(unsafe_code)]
+// wasm-bindgen generates unsafe blocks, so the wasm build cannot keep the forbid.
+#![cfg_attr(not(feature = "wasm"), forbid(unsafe_code))]
 #![warn(missing_docs)]
 #![doc = include_str!("../README.md")]
 
 #[cfg(feature = "ballistics")]
 pub mod ballistics;
+#[cfg(any(feature = "cli", feature = "wasm"))]
+pub mod command;
 mod error;
 mod flight;
 mod guidance;
 mod motor;
+#[cfg(feature = "wasm")]
+pub mod wasm;
 
 pub use error::{Error, Result};
 pub use flight::{

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rockets-engine — browser terminal</title>
+<meta name="description" content="Run the rockets-engine CLI in your browser: powered point-mass flight simulation compiled to WebAssembly.">
+<script src="https://code.highcharts.com/highcharts.js"></script>
+<style>
+  :root {
+    --bg: #0c0f14;
+    --panel: #131822;
+    --edge: #232c3d;
+    --text: #dbe4f0;
+    --dim: #8b98ac;
+    --accent: #ff7a3d;
+    --accent2: #5ec1ff;
+    --error: #ef4444;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--edge);
+  }
+  header .title { font-weight: 700; }
+  header .badge { color: var(--accent); font-size: 0.85rem; }
+  header a { color: var(--accent2); text-decoration: none; font-size: 0.85rem; margin-left: auto; }
+  header a:hover { text-decoration: underline; }
+  #screen {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 20px;
+    font-size: 14px;
+    line-height: 1.45;
+    cursor: text;
+  }
+  .line { white-space: pre-wrap; word-break: break-word; }
+  .line.echo { color: var(--accent2); }
+  .line.err { color: var(--error); }
+  .line.dim { color: var(--dim); }
+  #prompt-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 20px;
+    border-top: 1px solid var(--edge);
+    background: var(--panel);
+  }
+  #prompt { color: var(--accent); }
+  #cmd {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text);
+    font: inherit;
+    caret-color: var(--accent);
+  }
+  #status { color: var(--dim); font-size: 0.8rem; padding: 0 20px 8px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="title">rockets-engine</span>
+  <span class="badge" id="ver">loading…</span>
+  <a href="/">rockets.rs</a>
+  <a href="https://crates.io/crates/rockets-engine">crates.io</a>
+  <a href="https://docs.rs/rockets-engine">docs.rs</a>
+  <a href="https://github.com/ajokela/rockets-engine">github</a>
+</header>
+<div id="screen" aria-live="polite"></div>
+<div id="prompt-row">
+  <span id="prompt">rockets$</span>
+  <input id="cmd" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" autofocus>
+</div>
+<div id="status">↑/↓ history · clear wipes the screen · help lists commands</div>
+
+<script type="module">
+import init, { WasmRockets } from './wasm/rockets_engine.js';
+
+const screen = document.getElementById('screen');
+const input = document.getElementById('cmd');
+const badge = document.getElementById('ver');
+
+function print(text, cls = '') {
+  for (const raw of text.replace(/\n$/, '').split('\n')) {
+    const div = document.createElement('div');
+    div.className = 'line' + (cls ? ' ' + cls : '');
+    div.textContent = raw === '' ? ' ' : raw;
+    screen.appendChild(div);
+  }
+  screen.scrollTop = screen.scrollHeight;
+}
+
+print('compiling the pad…', 'dim');
+
+let engine = null;
+try {
+  await init('./wasm/rockets_engine_bg.wasm');
+  engine = new WasmRockets();
+  badge.textContent = 'v' + engine.version();
+  screen.innerHTML = '';
+  print('rockets-engine ' + engine.version() + ' — browser terminal (WASM)');
+  print("type 'help' for commands, or try:");
+  print('  simulate --curve 0:0,0.1:20,0.9:15,1:0 --dry-mass 0.18 --propellant-mass 0.04 --ignition-s 0.2 --plot', 'dim');
+} catch (e) {
+  badge.textContent = 'wasm failed';
+  print('failed to load the engine: ' + e, 'err');
+}
+
+const history = [];
+let cursor = 0;
+
+// `--plot` is platform-relative: the native CLI prints ASCII, the browser draws
+// Highcharts. The terminal strips the flag for the text run, then re-runs the
+// same command with --format json to feed the chart.
+function renderChart(rows) {
+  const div = document.createElement('div');
+  div.style.cssText = 'height:320px;margin:10px 0;background:#131822;border:1px solid #232c3d;border-radius:8px;padding:8px;';
+  screen.appendChild(div);
+  Highcharts.chart(div, {
+    chart: { backgroundColor: 'transparent', style: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' } },
+    title: { text: null },
+    credits: { enabled: false },
+    xAxis: {
+      title: { text: 't (s)', style: { color: '#8b98ac' } },
+      labels: { style: { color: '#8b98ac' } },
+      gridLineColor: '#232c3d', lineColor: '#232c3d', tickColor: '#232c3d',
+    },
+    yAxis: [
+      {
+        title: { text: 'altitude (m)', style: { color: '#ff7a3d' } },
+        labels: { style: { color: '#8b98ac' } },
+        gridLineColor: '#232c3d',
+      },
+      {
+        title: { text: 'speed (m/s)', style: { color: '#5ec1ff' } },
+        labels: { style: { color: '#8b98ac' } },
+        gridLineWidth: 0,
+        opposite: true,
+      },
+    ],
+    legend: { itemStyle: { color: '#dbe4f0' } },
+    tooltip: { shared: true, valueDecimals: 1, backgroundColor: '#131822', style: { color: '#dbe4f0' } },
+    series: [
+      { name: 'altitude', type: 'line', color: '#ff7a3d', marker: { enabled: false }, data: rows.map(r => [r.t_s, r.y_m]) },
+      { name: 'speed', type: 'line', color: '#5ec1ff', yAxis: 1, dashStyle: 'ShortDash', marker: { enabled: false }, data: rows.map(r => [r.t_s, r.speed_mps]) },
+    ],
+  });
+  screen.scrollTop = screen.scrollHeight;
+}
+
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (cursor > 0) input.value = history[--cursor] ?? '';
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    if (cursor < history.length) input.value = history[++cursor] ?? '';
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    const line = input.value.trim();
+    input.value = '';
+    if (!line) return;
+    print('rockets$ ' + line, 'echo');
+    if (line === 'clear') { screen.innerHTML = ''; return; }
+    history.push(line);
+    cursor = history.length;
+    if (!engine) { print('engine is not loaded', 'err'); return; }
+    const isSim = /^(simulate|sim)(\s|$)/.test(line);
+    const wantsPlot = isSim && /(^|\s)--plot(?=\s|$)/.test(line);
+    const textLine = wantsPlot ? line.replace(/(^|\s)--plot(?=\s|$)/g, '$1').trim() : line;
+    try {
+      print(engine.runCommand(textLine));
+      if (wantsPlot) {
+        const jsonLine = /--format\s+\S+/.test(textLine)
+          ? textLine.replace(/--format\s+\S+/, '--format json')
+          : textLine + ' --format json';
+        const rows = JSON.parse(engine.runCommand(jsonLine));
+        renderChart(rows);
+      }
+    } catch (err) {
+      print(String(err), 'err');
+    }
+  }
+});
+
+document.getElementById('screen').addEventListener('click', () => input.focus());
+</script>
+</body>
+</html>

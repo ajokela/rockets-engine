@@ -8,7 +8,7 @@ The crate is published on crates.io and consumes `ballistics-engine` 0.48.0 from
 
 ```toml
 [dependencies]
-rockets-engine = "0.2"
+rockets-engine = "0.3"
 ```
 
 ## Run
@@ -23,6 +23,21 @@ cargo doc --locked --no-deps --open
 ```
 
 `boost_coast` prints CSV for a synthetic small rocket through ignition, powered flight and coast. Its numbers are illustrative. `guidance_hook` demonstrates externally supplied control acceleration without a target-tracking algorithm. `staging` flies a three-stage rocket through separations and inter-stage coasts. `icbm_midcourse` coasts a post-boost state around a central-gravity Earth to a reentry handoff; it needs no features and shows the planet-scale use of the integrator.
+
+## Command line
+
+The `cli` feature builds a `rockets` binary:
+
+```sh
+cargo install rockets-engine --features cli
+rockets simulate --curve 0:0,0.1:20,0.9:15,1:0 --dry-mass 0.18 --propellant-mass 0.04 --ignition-s 0.2 --plot
+```
+
+`simulate` prints the trajectory as a table, CSV or JSON, with an optional ASCII altitude chart. Add `--diameter-m` and `--cd` to fly against the ballistics-engine atmosphere and drag kernel, `--wind` for moving air, and `--elevation-deg`/`--azimuth-deg`/`--speed-mps` to aim the launch. `rockets help` lists every option.
+
+## Browser terminal
+
+The same command surface runs at [rockets.rs/sh/](https://rockets.rs/sh/), compiled to WebAssembly. `src/wasm.rs` is a thin binding over the shared parser in `src/command.rs`, so the native and browser builds accept identical commands; `scripts/build-wasm.sh` rebuilds the module.
 
 ## Basic use
 
@@ -100,7 +115,17 @@ This baseline follows the thrust-curve, propellant-mass, gravity and drag struct
 - The core has no target, seeker, interception or Godot entity types. Controllers can own their own state and inputs without changing the integrator.
 - `ForceModel::acceleration` supplies environmental acceleration at each RK4 stage with that stage's current mass. A closure can implement this hook too. Keep it deterministic and free of side effects. `BallisticForces::acceleration_in_wind` supports wrappers that sample spatial or time-dependent wind.
 
-The atmospheric adapter uses the body's own Cd-versus-Mach curve and updates both SI mass and the engine's imperial mass mirror. It includes gravity and drag; bullet-specific spin, yaw, Magnus, Coriolis and postprocessing effects are disabled. Standard atmosphere delegates to the upstream altitude model: humidity affects density, while this derivative path uses dry-air sound speed. Uniform atmosphere obeys the upstream direct-mode limits (`0 ≤ density < 2 kg/m³`, sound speed `> 200 m/s`); a zero density retains gravity but removes drag. `UniformGravity(Vec3::zeros())` gives an inertial vacuum.
+The atmospheric adapter uses the body's own Cd-versus-Mach curve and updates both SI mass and the engine's imperial mass mirror. It includes gravity and drag; bullet-specific reference-BC and postprocessing effects (Litz spin drift) are disabled. Standard atmosphere delegates to the upstream altitude model: humidity affects density, while this derivative path uses dry-air sound speed. Uniform atmosphere obeys the upstream direct-mode limits (`0 ≤ density < 2 kg/m³`, sound speed `> 200 m/s`); a zero density retains gravity but removes drag. `UniformGravity(Vec3::zeros())` gives an inertial vacuum.
+
+### Modified point-mass
+
+`BallisticForces` climbs one rung above point-mass through three opt-in builders, all evaluated in-loop by the upstream kernel:
+
+- `with_spin(twist_rate_in, body_length_m, right_hand)` — Magnus force and yaw of repose for a spinning body. `twist_rate_in` is rifling language (inches per turn); for a fin-canted rocket it is the roll rate the cant produces per unit velocity. The correlations are McCoy bullet shapes, so treat magnitudes as approximate for blunt or finned bodies; signs and scaling are physical.
+- `with_coriolis(latitude_deg, shot_azimuth_deg)` — rotating-frame deflection for planet-scale arcs, exact `−2Ω×v`. Do not combine with an inertial-frame `CentralGravity` model, which already accounts for Earth rotation by not rotating.
+- `with_tipoff_yaw(yaw_rad, decay_distance_m)` — rail tip-off: an initial yaw decaying exponentially with downrange distance, perturbing the early angle of attack.
+
+The CLI exposes the same surface: `--twist-in`/`--body-length-m`/`--twist-left`, `--coriolis lat:az`, `--tipoff yaw:decay`.
 
 The upstream ICAO atmosphere is defined to about 80 km; do not fly `BallisticForces` above it. Wrap it in `AltitudeSwitch` with a vacuum model above a cutoff (`UniformGravity` for flat-frame flight, `CentralGravity` for Earth-centered arcs) when a trajectory leaves the atmosphere.
 

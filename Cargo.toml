@@ -1,6 +1,6 @@
 [package]
 name = "rockets-engine"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.89"
 authors = ["Alex Jokela <email@tinycomputers.io>"]
@@ -12,19 +12,34 @@ documentation = "https://docs.rs/rockets-engine"
 readme = "README.md"
 keywords = ["rocket", "ballistics", "trajectory", "physics", "simulation"]
 categories = ["science", "simulation"]
+exclude = ["site/"]
+
+[lib]
+# cdylib lets wasm-pack build the browser terminal; rlib serves every other consumer.
+crate-type = ["rlib", "cdylib"]
 
 [features]
 default = ["ballistics", "serde"]
 ballistics = ["dep:ballistics-engine"]
 serde = ["dep:serde", "nalgebra/serde-serialize"]
+cli = []
+wasm = ["dep:wasm-bindgen"]
 
 [dependencies]
 ballistics-engine = { version = "=0.48.0", default-features = false, optional = true }
 nalgebra = { version = "0.35", default-features = false, features = ["std"] }
 serde = { version = "1.0", features = ["derive"], optional = true }
+# Pinned to the wasm-bindgen CLI on the build machines; the CLI and the crate
+# must match exactly or the bindgen step rejects its own schema.
+wasm-bindgen = { version = "=0.2.106", optional = true }
 
 [dev-dependencies]
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
+
+[[bin]]
+name = "rockets"
+path = "src/main.rs"
+required-features = ["cli"]
 
 [[example]]
 name = "boost_coast"
