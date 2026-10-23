@@ -8,7 +8,7 @@ The crate is published on crates.io and consumes `ballistics-engine` 0.48.0 from
 
 ```toml
 [dependencies]
-rockets-engine = "0.1"
+rockets-engine = "0.2"
 ```
 
 ## Run
@@ -17,10 +17,12 @@ rockets-engine = "0.1"
 cargo test --locked --all-features
 cargo run --locked --example boost_coast
 cargo run --locked --example guidance_hook
+cargo run --locked --example staging
+cargo run --locked --example icbm_midcourse
 cargo doc --locked --no-deps --open
 ```
 
-`boost_coast` prints CSV for a synthetic small rocket through ignition, powered flight and coast. Its numbers are illustrative. `guidance_hook` demonstrates externally supplied control acceleration without a target-tracking algorithm.
+`boost_coast` prints CSV for a synthetic small rocket through ignition, powered flight and coast. Its numbers are illustrative. `guidance_hook` demonstrates externally supplied control acceleration without a target-tracking algorithm. `staging` flies a three-stage rocket through separations and inter-stage coasts. `icbm_midcourse` coasts a post-boost state around a central-gravity Earth to a reentry handoff; it needs no features and shows the planet-scale use of the integrator.
 
 ## Basic use
 
@@ -77,12 +79,14 @@ let forces = BallisticForces::new(
 ## Model and units
 
 - All values use SI units: metres, seconds, kilograms, newtons and m/s². Time is simulation time. Any game time compression belongs outside this crate.
-- The fixed right-handed frame is X downrange, Y up, Z lateral. With `BallisticForces`, position Y is absolute altitude above sea level; the weather station has its own altitude. Launch elevation is encoded in velocity and thrust direction, not a rotating coordinate frame.
+- For local flight the fixed right-handed frame is X downrange, Y up, Z lateral. With `BallisticForces`, position Y is absolute altitude above sea level; the weather station has its own altitude. Launch elevation is encoded in velocity and thrust direction, not a rotating coordinate frame.
+- For planet-scale flight, integrate in an Earth-centered frame with `CentralGravity`: position measured from Earth's center, inverse-square gravity in both magnitude and direction. `icbm_midcourse` shows the pattern. The flat-frame models (`UniformGravity`, `BallisticForces`) are invalid at intercontinental ranges; `CentralGravity` is invalid (singular) at its own center and carries no atmosphere.
 - Thrust is piecewise linear in time since ignition. Curves must start at zero time, have at least two samples, strictly increase in time and have positive total impulse. Nonzero endpoint thrust is supported.
 - Fuel consumption is proportional to delivered impulse. If `I(t)` is accumulated impulse, `I_total` is total impulse and `mp` is initial propellant mass, remaining fuel is `mp × (1 − I(t)/I_total)`. This assumes constant effective exhaust velocity `I_total/mp`; the prescribed thrust already includes exhaust/pressure effects. There is no separate motor pressure compensation.
 - Mass is computed analytically at every RK4 stage rather than numerically integrating and clamping an independent fuel state. Dry mass is positive and fuel cannot become negative. At burnout thrust is zero and the empty motor remains attached.
-- Ignition, every curve knot and burnout split the integration grid. RK4 uses the appropriate one-sided force at discontinuities, including burns shorter than the maximum timestep.
-- The default maximum internal step is 0.01 seconds. This is fixed-step RK4, not an adaptive solver; choose a timestep suitable for the forces and confirm convergence for new vehicle models.
+- A `Rocket` is a base mass plus any number of `Stage`s, each with its own motor schedule and an optional separation time. Total thrust sums over attached burning motors, so serial and parallel (strap-on) staging share one model. At separation the stage's dry mass, motor and unspent propellant leave the vehicle; separating a burning stage (hot staging) ends its thrust. `Rocket::new` keeps the 0.1 single-motor shape.
+- Ignition, every curve knot, burnout and every stage separation split the integration grid. RK4 uses the appropriate one-sided mass and force at discontinuities: a step closing on a separation still sees the departing stage, and the next step opens without it, including burns shorter than the maximum timestep.
+- The default maximum internal step is 0.01 seconds, sized for motor burns. In vacuum coast (midcourse) raise it — seconds per step is plenty under central gravity; the Kepler-invariant tests integrate orbits at 1–2 s steps. This is fixed-step RK4, not an adaptive solver; choose a timestep suitable for the forces and confirm convergence for new vehicle models.
 
 This baseline follows the thrust-curve, propellant-mass, gravity and drag structure illustrated by [NASA's model rocket simulation](https://github.com/nasa/trick/blob/master/trick_sims/SIM_rocket/Readme.md). The force model is consistent with NASA's [rocket thrust equation](https://www1.grc.nasa.gov/beginners-guide-to-aeronautics/rocket-thrust-equation/).
 
@@ -98,6 +102,8 @@ This baseline follows the thrust-curve, propellant-mass, gravity and drag struct
 
 The atmospheric adapter uses the body's own Cd-versus-Mach curve and updates both SI mass and the engine's imperial mass mirror. It includes gravity and drag; bullet-specific spin, yaw, Magnus, Coriolis and postprocessing effects are disabled. Standard atmosphere delegates to the upstream altitude model: humidity affects density, while this derivative path uses dry-air sound speed. Uniform atmosphere obeys the upstream direct-mode limits (`0 ≤ density < 2 kg/m³`, sound speed `> 200 m/s`); a zero density retains gravity but removes drag. `UniformGravity(Vec3::zeros())` gives an inertial vacuum.
 
+The upstream ICAO atmosphere is defined to about 80 km; do not fly `BallisticForces` above it. Wrap it in `AltitudeSwitch` with a vacuum model above a cutoff (`UniformGravity` for flat-frame flight, `CentralGravity` for Earth-centered arcs) when a trajectory leaves the atmosphere.
+
 ## Save, replay and host integration
 
 `Simulator` does not hold evolving flight state. Each step returns a new `FlightState`, end-of-step motor/mass telemetry and its internal step count. An error leaves the caller's state untouched. Invalid numeric inputs and non-finite results return errors, and each call has a bounded substep budget.
@@ -108,13 +114,13 @@ For deterministic replay, retain the same fixed public update cadence, control i
 
 For Counterbattery, a future `CbBallistics` adapter can repeatedly call `step` to precompute an unguided powered arc, or call `step_guided` at the simulation cadence for live control. Convert world coordinates once at that boundary, especially absolute altitude and side-facing X. The host must detect terrain and unit collisions over each returned movement interval; the library does not stop on a ground plane. No game integration is included in this crate.
 
-## Scope of 0.1
+## Scope of 0.2
 
-The engine models translation with one prescribed motor burn. It does not yet model throttle/shutdown/restart, staging, launch rails, changing drag geometry, body attitude, lift coefficients, actuator dynamics, seekers or terrain collision localization. Guidance hooks provide the boundary for future control models; they are not a built-in autopilot.
+The engine models translation with prescribed motor burns across serial or parallel stages, in flat or Earth-centered frames. It does not yet model throttle or restart within a stage, launch rails, changing drag geometry, body attitude, lift coefficients, actuator dynamics, seekers, Earth rotation (Coriolis and launch-site velocity are the caller's responsibility in an ECI frame), orbit perturbations such as J2, or terrain collision localization. Guidance hooks provide the boundary for future control models; they are not a built-in autopilot.
 
 ## Validation
 
-The tests check the ideal rocket equation and analytic position in vacuum, RK4 convergence, delayed ignition, nonzero endpoint thrust, short burns, zero-thrust intervals, fuel bounds, wind/mass/drag response, control limits, invalid inputs, work limits, and snapshot replay. Unpowered trajectories are compared against the upstream RK4 solver across multiple vehicle, wind and atmosphere configurations. These checks establish numerical behavior and compatibility, not empirical validation of a particular real motor or airframe.
+The tests check the ideal rocket equation and analytic position in vacuum, RK4 convergence, delayed ignition, nonzero endpoint thrust, short burns, zero-thrust intervals, fuel bounds, wind/mass/drag response, control limits, invalid inputs, work limits, and snapshot replay. Unpowered trajectories are compared against the upstream RK4 solver across multiple vehicle, wind and atmosphere configurations. Staging tests cover exact mass drops at separation, hot-staging thrust overlap, inter-stage coast phases, parallel boosters and two-burn Δv against Tsiolkovsky — including a regression for one-sided mass at a step closing exactly on a separation. Central-gravity tests assert Kepler invariants: a circular orbit closes to millimetres and an ICBM-scale midcourse ellipse conserves specific energy and angular momentum to better than 1 part in 10¹⁰. These checks establish numerical behavior and compatibility, not empirical validation of a particular real motor or airframe.
 
 ```sh
 cargo fmt --all -- --check

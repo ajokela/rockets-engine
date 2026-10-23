@@ -1,6 +1,6 @@
 use crate::{
-    finite_vec, nonnegative, positive, ControlInput, Error, Guidance, GuidanceContext, MotorPhase,
-    Result, Rocket, RocketSample, Vec3,
+    finite_vec, nonnegative, positive, ControlInput, Error, Guidance, GuidanceContext, Result,
+    Rocket, RocketSample, Vec3,
 };
 
 /// Complete translational state. Motor phase and fuel are derived from time and configuration.
@@ -57,6 +57,115 @@ impl Default for UniformGravity {
 impl ForceModel for UniformGravity {
     fn acceleration(&self, _state: &FlightState, _mass_kg: f64) -> Result<Vec3> {
         Ok(self.0)
+    }
+}
+
+/// Standard gravitational parameter of Earth, in cubic metres per second squared.
+pub const EARTH_MU_M3_S2: f64 = 3.986_004_418e14;
+
+/// Inverse-square gravity toward a fixed center, for planet-scale flight.
+///
+/// Unlike [`UniformGravity`], both magnitude and direction vary with position,
+/// which matters once trajectories span hundreds of kilometres or climb above
+/// the atmosphere. Positions are read in the caller's frame; place `center_m`
+/// at the attracting body's center (for an Earth-centered inertial coast, the
+/// origin). There is no atmosphere here: pair with an [`AltitudeSwitch`] or a
+/// custom model when drag still applies.
+#[derive(Debug, Clone, Copy)]
+pub struct CentralGravity {
+    mu_m3_s2: f64,
+    center_m: Vec3,
+}
+
+impl CentralGravity {
+    /// A central field with gravitational parameter `mu_m3_s2` about `center_m`.
+    pub fn new(mu_m3_s2: f64, center_m: Vec3) -> Result<Self> {
+        positive(mu_m3_s2, "mu_m3_s2")?;
+        if !finite_vec(&center_m) {
+            return Err(Error::invalid("center_m", "must be finite"));
+        }
+        Ok(Self { mu_m3_s2, center_m })
+    }
+
+    /// Earth's field ([`EARTH_MU_M3_S2`]) about `center_m`.
+    pub fn earth(center_m: Vec3) -> Result<Self> {
+        Self::new(EARTH_MU_M3_S2, center_m)
+    }
+
+    /// Gravitational parameter in m³/s².
+    pub fn mu_m3_s2(&self) -> f64 {
+        self.mu_m3_s2
+    }
+    /// Attracting center in the caller's frame.
+    pub fn center_m(&self) -> Vec3 {
+        self.center_m
+    }
+}
+
+impl ForceModel for CentralGravity {
+    fn acceleration(&self, state: &FlightState, _mass_kg: f64) -> Result<Vec3> {
+        let offset = state.position_m - self.center_m;
+        let distance_squared = offset.norm_squared();
+        if !distance_squared.is_finite() || distance_squared == 0.0 {
+            return Err(Error::NumericalFailure(
+                "central gravity is singular at its center",
+            ));
+        }
+        let acceleration = offset * (-self.mu_m3_s2 / (distance_squared * distance_squared.sqrt()));
+        if !finite_vec(&acceleration) {
+            return Err(Error::NumericalFailure("non-finite central gravity"));
+        }
+        Ok(acceleration)
+    }
+}
+
+/// Routes to one of two force models depending on altitude (position Y).
+///
+/// Use it to bound a dense-atmosphere model: at and below the cutoff, forces
+/// come from e.g. `BallisticForces`; above it, from a vacuum model such as
+/// [`UniformGravity`] or [`CentralGravity`]. The Y coordinate follows the
+/// crate's world-frame convention; with the ballistics adapter it is absolute
+/// altitude above sea level.
+#[derive(Debug, Clone)]
+pub struct AltitudeSwitch<Below, Above> {
+    below: Below,
+    above: Above,
+    cutoff_altitude_m: f64,
+}
+
+impl<Below, Above> AltitudeSwitch<Below, Above> {
+    /// Switch from `below` to `above` at `cutoff_altitude_m` (inclusive below).
+    pub fn new(below: Below, above: Above, cutoff_altitude_m: f64) -> Result<Self> {
+        if !cutoff_altitude_m.is_finite() {
+            return Err(Error::invalid("cutoff_altitude_m", "must be finite"));
+        }
+        Ok(Self {
+            below,
+            above,
+            cutoff_altitude_m,
+        })
+    }
+    /// Model used at and below the cutoff.
+    pub fn below(&self) -> &Below {
+        &self.below
+    }
+    /// Model used above the cutoff.
+    pub fn above(&self) -> &Above {
+        &self.above
+    }
+    /// Handoff altitude in metres.
+    pub fn cutoff_altitude_m(&self) -> f64 {
+        self.cutoff_altitude_m
+    }
+}
+
+impl<Below: ForceModel, Above: ForceModel> ForceModel for AltitudeSwitch<Below, Above> {
+    fn acceleration(&self, state: &FlightState, mass_kg: f64) -> Result<Vec3> {
+        if state.position_m.y <= self.cutoff_altitude_m {
+            self.below.acceleration(state, mass_kg)
+        } else {
+            self.above.acceleration(state, mass_kg)
+        }
     }
 }
 
@@ -187,11 +296,7 @@ impl<E: ForceModel> Simulator<E> {
             let grid_boundary =
                 (state.time_s + grid_index as f64 * self.settings.max_step_s).min(end);
             let mut boundary = grid_boundary;
-            if let Some(event) = self
-                .rocket
-                .motor()
-                .and_then(|m| m.next_event_after(current.time_s))
-            {
+            if let Some(event) = self.rocket.next_event_after(current.time_s) {
                 boundary = boundary.min(event);
             }
             if boundary <= current.time_s {
@@ -264,16 +369,13 @@ impl<E: ForceModel> Simulator<E> {
         state: FlightState,
         axis: Vec3,
         steering: Vec3,
-        burning: bool,
+        stages: &[crate::motor::IntervalStage],
     ) -> Result<(Vec3, Vec3)> {
         state
             .validate()
             .map_err(|_| Error::NumericalFailure("non-finite intermediate state"))?;
-        let mass = self.rocket.sample_unchecked(state.time_s).mass_kg;
-        let thrust = self
-            .rocket
-            .motor()
-            .map_or(0.0, |m| m.interval_thrust(state.time_s, burning));
+        let mass = self.rocket.interval_mass(state.time_s, stages);
+        let thrust = self.rocket.interval_thrust(state.time_s, stages);
         let acceleration =
             self.forces.acceleration(&state, mass)? + axis * (thrust / mass) + steering;
         if !finite_vec(&acceleration) {
@@ -284,17 +386,17 @@ impl<E: ForceModel> Simulator<E> {
 
     fn rk4(&self, start: FlightState, end: f64, axis: Vec3, steering: Vec3) -> Result<FlightState> {
         let dt = end - start.time_s;
-        let burning = self.rocket.sample_unchecked(start.time_s).motor.phase == MotorPhase::Burning;
+        let stages = self.rocket.interval_stages(start.time_s);
         let stage = |derivative: (Vec3, Vec3), delta: f64, time_s: f64| FlightState {
             time_s,
             position_m: start.position_m + derivative.0 * delta,
             velocity_mps: start.velocity_mps + derivative.1 * delta,
         };
         let midpoint = start.time_s + dt * 0.5;
-        let k1 = self.derivative(start, axis, steering, burning)?;
-        let k2 = self.derivative(stage(k1, dt * 0.5, midpoint), axis, steering, burning)?;
-        let k3 = self.derivative(stage(k2, dt * 0.5, midpoint), axis, steering, burning)?;
-        let k4 = self.derivative(stage(k3, dt, end), axis, steering, burning)?;
+        let k1 = self.derivative(start, axis, steering, &stages)?;
+        let k2 = self.derivative(stage(k1, dt * 0.5, midpoint), axis, steering, &stages)?;
+        let k3 = self.derivative(stage(k2, dt * 0.5, midpoint), axis, steering, &stages)?;
+        let k4 = self.derivative(stage(k3, dt, end), axis, steering, &stages)?;
         let result = FlightState {
             time_s: end,
             position_m: start.position_m + (k1.0 + k2.0 * 2.0 + k3.0 * 2.0 + k4.0) * (dt / 6.0),

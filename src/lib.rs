@@ -1,13 +1,16 @@
 //! Powered, three-dimensional point-mass flight, using SI units and simulation time.
 //!
-//! A prescribed motor supplies thrust and consumes propellant in proportion to impulse.
-//! [`Simulator`] integrates translation while [`ForceModel`] supplies environmental
-//! acceleration and [`Guidance`] supplies optional control commands. The default
-//! `ballistics` feature reuses ballistics-engine's gravity, atmosphere and drag kernel.
+//! Prescribed motors supply thrust and consume propellant in proportion to impulse;
+//! [`Stage`]s add serial or parallel staging with scheduled separations. [`Simulator`]
+//! integrates translation while [`ForceModel`] supplies environmental acceleration and
+//! [`Guidance`] supplies optional control commands. [`UniformGravity`] covers local
+//! flat-frame flight and [`CentralGravity`] covers planet-scale arcs; the default
+//! `ballistics` feature reuses ballistics-engine's atmosphere and drag kernel.
 //!
-//! Coordinates are fixed, right-handed X/downrange, Y/up, Z/lateral. With the ballistics
-//! adapter, Y is altitude above sea level. No time compression occurs inside this crate.
-//! This is a point-mass model, not an attitude, actuator or aerodynamic-lift simulation.
+//! Coordinates are right-handed; the conventional local frame is X/downrange, Y/up,
+//! Z/lateral, but [`CentralGravity`] works in an Earth-centered frame of the caller's
+//! choosing. No time compression occurs inside this crate. This is a point-mass model,
+//! not an attitude, actuator or aerodynamic-lift simulation.
 //!
 //! See the README and `examples/boost_coast.rs` for integration and model assumptions.
 
@@ -24,10 +27,13 @@ mod motor;
 
 pub use error::{Error, Result};
 pub use flight::{
-    FlightState, ForceModel, IntegratorSettings, Simulator, StepResult, UniformGravity,
+    AltitudeSwitch, CentralGravity, FlightState, ForceModel, IntegratorSettings, Simulator,
+    StepResult, UniformGravity, EARTH_MU_M3_S2,
 };
 pub use guidance::{ControlInput, FixedDirection, Guidance, GuidanceContext};
-pub use motor::{Motor, MotorPhase, MotorSample, Rocket, RocketSample, ThrustCurve, ThrustPoint};
+pub use motor::{
+    Motor, MotorPhase, MotorSample, Rocket, RocketSample, Stage, ThrustCurve, ThrustPoint,
+};
 
 /// Three-dimensional SI vector in the fixed world frame.
 pub type Vec3 = nalgebra::Vector3<f64>;
