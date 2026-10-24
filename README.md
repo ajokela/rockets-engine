@@ -149,6 +149,10 @@ A subsonic Barrowman modeler, implemented against the OpenRocket technical docum
 
 Limits, deliberately: subsonic only (Mach-1 clamp), conical/ogive/elliptical/parabolic noses, trapezoidal fins, no boat-tails or transitions, no induced-drag-from-AoA model (`induced_k` stays zero — supply your own if needed). CLI: `--geometry nose=shape:L:D,tube=L:D,fins=N:cr:ct:s:m:t` with `m` the leading-edge sweep and `t` the fin thickness (metres).
 
+The Cnα/CP output is validated against OpenRocket's own test suite (`tests/openrocket_parity.rs` reproduces BarrowmanCalculatorTest's Estes Alpha III values, three- and four-fin variants, within half a percent).
+
+`RocketGeometry::mass_properties(nose_kg, tube_kg, fins_kg, casing)` completes the picture: it combines the component masses with geometry-derived CGs (solid-of-revolution nose, thin-walled tube, fin planform centroid, motor casing at the aft end) into a dry CG and a pitch-inertia estimate about that CG. CLI: `--geometry-masses nose,tube,fins` (kg) replaces `--dry-mass` and estimates `--cg-dry-m`, `--cg-prop-m` and `--pitch-inertia`, so a full weathercock flight needs only the geometry, the masses and a motor file.
+
 ### Model rockets
 
 The `model` feature (default on) adds hobbyist conveniences:

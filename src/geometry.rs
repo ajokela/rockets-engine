@@ -227,16 +227,127 @@ impl RocketGeometry {
     }
 
     /// Total fin-set normal-force slope for this Mach number.
+    ///
+    /// The Diederich `fin_cna1` is the slope of a fin *pair* (a wing of
+    /// semispan `span`), so a set of `n` fins contributes `n/2` pairs,
+    /// with fin-body carryover (1 + tau) and a many-fin interference
+    /// reduction. This matches OpenRocket's `FinSetCalc` convention,
+    /// verified against its BarrowmanCalculatorTest Alpha III values.
     fn fin_set_cna(&self, mach: f64) -> f64 {
         self.fin_cna1(mach)
             * (1.0 + self.interference_tau())
             * self.fin_count_factor()
-            * self.fins.count as f64
+            * (self.fins.count as f64 / 2.0)
     }
 
     /// Fin CP measured from the nose tip (fin trailing edge at body end).
     fn fin_cp_abs(&self) -> f64 {
         self.total_length_m() - self.fins.root_chord_m + self.fin_cp()
+    }
+
+    /// Nose radius profile r(x) with x measured from the tip.
+    fn nose_radius(&self, x: f64) -> f64 {
+        let l = self.nose.length_m;
+        let r = self.nose.diameter_m / 2.0;
+        let t = (x / l).clamp(0.0, 1.0);
+        match self.nose.shape {
+            NoseShape::Conical => r * t,
+            NoseShape::Elliptical => r * (1.0 - (1.0 - t).powi(2)).sqrt(),
+            NoseShape::Parabolic => r * t * (2.0 - t),
+            NoseShape::Ogive => {
+                let rho = (r * r + l * l) / (2.0 * r);
+                (rho * rho - (l - x).powi(2)).max(0.0).sqrt() - (rho - r)
+            }
+        }
+    }
+
+    /// Solid-nose CG (from the tip) and pitch inertia per unit mass about
+    /// that CG, from numerical integration of the radius profile.
+    fn nose_volume_properties(&self) -> (f64, f64) {
+        const N: usize = 1024;
+        let l = self.nose.length_m;
+        let dx = l / N as f64;
+        let mut volume = 0.0; // ∫ r² dx (up to the density·π factor)
+        let mut moment = 0.0; // ∫ x r² dx
+        for i in 0..N {
+            let x = (i as f64 + 0.5) * dx;
+            let r2 = self.nose_radius(x).powi(2);
+            volume += r2 * dx;
+            moment += x * r2 * dx;
+        }
+        let cg = moment / volume;
+        let mut inertia = 0.0; // ∫ r² (r²/4 + (x−cg)²) dx
+        for i in 0..N {
+            let x = (i as f64 + 0.5) * dx;
+            let r2 = self.nose_radius(x).powi(2);
+            inertia += r2 * (r2 / 4.0 + (x - cg).powi(2)) * dx;
+        }
+        (cg, inertia / volume)
+    }
+
+    /// Fin planform centroid, measured from the root leading edge.
+    fn fin_planform_cg(&self) -> f64 {
+        let (cr, ct, m) = (
+            self.fins.root_chord_m,
+            self.fins.tip_chord_m,
+            self.fins.leading_sweep_m,
+        );
+        (cr * cr + cr * ct + ct * ct + m * (cr + 2.0 * ct)) / (3.0 * (cr + ct))
+    }
+
+    /// Fin centroid height above the body surface.
+    fn fin_radial_cg(&self) -> f64 {
+        let (cr, ct, s) = (
+            self.fins.root_chord_m,
+            self.fins.tip_chord_m,
+            self.fins.span_m,
+        );
+        s * (cr + 2.0 * ct) / (3.0 * (cr + ct))
+    }
+
+    /// Combine component masses with the geometry's component CGs into a
+    /// dry CG and a pitch-inertia estimate about that CG.
+    ///
+    /// The nose is a solid of revolution (numerically integrated), the
+    /// tube a thin-walled cylinder, and the fins and optional motor casing
+    /// point masses; evenly spaced fins add n/2 · m · (r_body + y_cg)² for
+    /// their radial offset. `casing` is (mass_kg, CG from the nose tip).
+    pub fn mass_properties(
+        &self,
+        nose_kg: f64,
+        tube_kg: f64,
+        fins_kg: f64,
+        casing: Option<(f64, f64)>,
+    ) -> MassProperties {
+        assert!(
+            nose_kg >= 0.0 && tube_kg >= 0.0 && fins_kg >= 0.0,
+            "component masses must be non-negative"
+        );
+        let (nose_cg, nose_inertia) = self.nose_volume_properties();
+        let tube_cg = self.nose.length_m + self.tube.length_m / 2.0;
+        let fin_cg = self.total_length_m() - self.fins.root_chord_m + self.fin_planform_cg();
+        let mut parts: Vec<(f64, f64, f64)> = vec![
+            (nose_kg, nose_cg, nose_kg * nose_inertia),
+            (
+                tube_kg,
+                tube_cg,
+                tube_kg * (self.tube.length_m.powi(2) / 12.0 + self.tube.diameter_m.powi(2) / 8.0),
+            ),
+            (fins_kg, fin_cg, 0.0),
+        ];
+        if let Some((kg, cg)) = casing {
+            parts.push((kg, cg, 0.0));
+        }
+        let total: f64 = parts.iter().map(|p| p.0).sum();
+        assert!(total > 0.0, "component masses must sum to a positive mass");
+        let cg: f64 = parts.iter().map(|p| p.0 * p.1).sum::<f64>() / total;
+        let mut inertia: f64 = parts.iter().map(|p| p.2 + p.0 * (p.1 - cg).powi(2)).sum();
+        inertia += fins_kg * (self.tube.diameter_m / 2.0 + self.fin_radial_cg()).powi(2) / 2.0;
+        MassProperties {
+            dry_mass_kg: total,
+            dry_cg_m: cg,
+            pitch_inertia_kg_m2: inertia,
+        }
     }
 
     /// Total CP from the component moment sum (nose + fin set).
@@ -412,6 +523,18 @@ pub fn parse_geometry(spec: &str) -> Result<RocketGeometry> {
     ))
 }
 
+/// Dry-mass breakdown estimated from geometry and component masses by
+/// [`RocketGeometry::mass_properties`].
+#[derive(Debug, Clone, Copy)]
+pub struct MassProperties {
+    /// Sum of the component masses (structure plus motor casing).
+    pub dry_mass_kg: f64,
+    /// Dry centre of gravity, metres aft of the nose tip.
+    pub dry_cg_m: f64,
+    /// Pitch inertia about the dry CG, kg·m².
+    pub pitch_inertia_kg_m2: f64,
+}
+
 /// The curves and reference quantities produced by [`RocketGeometry::analyze`].
 #[derive(Debug, Clone)]
 pub struct AeroAnalysis {
@@ -537,24 +660,111 @@ mod tests {
     }
 
     #[test]
+    fn conical_nose_volume_properties_match_the_solid_cone() {
+        let geo = example(); // conical nose, L = 0.1, R = 0.012
+        let (cg, inertia) = geo.nose_volume_properties();
+        assert!((cg - 0.75 * 0.1).abs() < 1e-6, "cg {cg}");
+        let expected = 3.0 * 0.012_f64.powi(2) / 20.0 + 3.0 * 0.1_f64.powi(2) / 80.0;
+        assert!(
+            (inertia - expected).abs() / expected < 1e-4,
+            "inertia {inertia} expected {expected}"
+        );
+    }
+
+    #[test]
+    fn fin_centroid_matches_polygon_limits() {
+        let geo = example();
+        // Rectangle limit (m = 0, ct = cr): centroid at cr/2, height s/2.
+        let rectangular = RocketGeometry::new(
+            geo.nose,
+            geo.tube,
+            TrapezoidalFins {
+                count: 3,
+                root_chord_m: 0.05,
+                tip_chord_m: 0.05,
+                span_m: 0.04,
+                leading_sweep_m: 0.0,
+                thickness_m: 0.002,
+            },
+        );
+        assert!((rectangular.fin_planform_cg() - 0.025).abs() < 1e-12);
+        assert!((rectangular.fin_radial_cg() - 0.02).abs() < 1e-12);
+        // Triangle limit (ct = 0): (cr + m)/3 from the leading edge, s/3 up.
+        let triangular = RocketGeometry::new(
+            geo.nose,
+            geo.tube,
+            TrapezoidalFins {
+                count: 3,
+                root_chord_m: 0.06,
+                tip_chord_m: 0.0,
+                span_m: 0.03,
+                leading_sweep_m: 0.03,
+                thickness_m: 0.002,
+            },
+        );
+        assert!((triangular.fin_planform_cg() - (0.06 + 0.03) / 3.0).abs() < 1e-12);
+        assert!((triangular.fin_radial_cg() - 0.01).abs() < 1e-12);
+    }
+
+    #[test]
+    fn mass_properties_are_consistent() {
+        let geo = example();
+        let props = geo.mass_properties(0.012, 0.020, 0.006, None);
+        assert!((props.dry_mass_kg - 0.038).abs() < 1e-12);
+        // CG is the mass-weighted component mean, inside the airframe.
+        let (nose_cg, _) = geo.nose_volume_properties();
+        let tube_cg = geo.nose.length_m + geo.tube.length_m / 2.0;
+        let fin_cg = geo.total_length_m() - geo.fins.root_chord_m + geo.fin_planform_cg();
+        let expected_cg = (0.012 * nose_cg + 0.020 * tube_cg + 0.006 * fin_cg) / 0.038;
+        assert!((props.dry_cg_m - expected_cg).abs() < 1e-12);
+        assert!(props.dry_cg_m > 0.0 && props.dry_cg_m < geo.total_length_m());
+        assert!(props.pitch_inertia_kg_m2 > 0.0);
+        // A casing at the aft end moves the CG aft and adds inertia.
+        let with_casing = geo.mass_properties(0.012, 0.020, 0.006, Some((0.02, 0.32)));
+        assert!(with_casing.dry_cg_m > props.dry_cg_m);
+        assert!(with_casing.pitch_inertia_kg_m2 > props.pitch_inertia_kg_m2);
+        assert!((with_casing.dry_mass_kg - 0.058).abs() < 1e-12);
+        // A heavier nose moves the CG forward.
+        let heavy_nose = geo.mass_properties(0.024, 0.020, 0.006, None);
+        assert!(heavy_nose.dry_cg_m < props.dry_cg_m);
+    }
+
+    #[test]
+    fn mass_properties_single_component_is_exact() {
+        let geo = example();
+        let props = geo.mass_properties(0.0, 0.05, 0.0, None);
+        // Only the tube: CG at its midpoint, inertia its thin-cylinder value.
+        let tube_cg = geo.nose.length_m + geo.tube.length_m / 2.0;
+        assert!((props.dry_cg_m - tube_cg).abs() < 1e-12);
+        let expected =
+            0.05 * (geo.tube.length_m.powi(2) / 12.0 + geo.tube.diameter_m.powi(2) / 8.0);
+        assert!(
+            (props.pitch_inertia_kg_m2 - expected).abs() / expected < 1e-12,
+            "{} vs {expected}",
+            props.pitch_inertia_kg_m2
+        );
+    }
+
+    #[test]
     fn fin_set_cna_matches_diederich() {
         let geo = example();
-        // One fin: 2π·span²/(1+sqrt(1+(span²/(A·cosΓ))²)) / Aref, then N·(1+tau).
+        // Fin pair: 2π·span²/(1+sqrt(1+(span²/(A·cosΓ))²)) / Aref, then
+        // (N/2)·(1+tau) — the Diederich value is a wing (two fins).
         let area = geo.fin_area();
         let cos = geo.midchord_cos();
         let ratio = geo.fins.span_m * geo.fins.span_m / (area * cos);
         let one = 2.0 * std::f64::consts::PI * geo.fins.span_m * geo.fins.span_m
             / (1.0 + (1.0 + ratio * ratio).sqrt())
             / geo.ref_area_m2();
-        let expected = 3.0 * one * (1.0 + geo.interference_tau());
+        let expected = 1.5 * one * (1.0 + geo.interference_tau());
         let actual = geo.fin_set_cna(0.0);
         assert!(
             (actual - expected).abs() / expected < 1e-9,
             "actual {actual} expected {expected}"
         );
-        // And the classic closed form 8N(s/d)²/(1+sqrt(1+(2l/(cr+ct))²))·K.
+        // And the classic closed form 4N(s/d)²/(1+sqrt(1+(2l/(cr+ct))²))·K.
         let d = geo.max_diameter_m();
-        let classic = 8.0 * 3.0 * (geo.fins.span_m / d).powi(2)
+        let classic = 4.0 * 3.0 * (geo.fins.span_m / d).powi(2)
             / (1.0 + (1.0_f64 + 1.0_f64).sqrt())
             * (1.0 + geo.interference_tau());
         assert!(

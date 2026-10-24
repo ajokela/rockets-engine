@@ -67,7 +67,8 @@ fn help() -> String {
      \n\
      VEHICLE\n\
      \x20 --curve <t:N,...>        thrust points, seconds:newtons (required)\n\
-     \x20 --dry-mass <kg>          vehicle mass without propellant (required)\n\
+     \x20 --dry-mass <kg>          vehicle mass without propellant (required\n\
+     \x20                            unless --geometry-masses)\n\
      \x20 --propellant-mass <kg>   consumable propellant (required)\n\
      \x20 --ignition-s <t>         ignition delay [0]\n\
      \x20 --stage <spec>          repeat for staging; replaces the single-motor\n\
@@ -82,6 +83,9 @@ fn help() -> String {
      \x20 --geometry <spec>       subsonic Barrowman modeler:\n\
      \x20                            nose=shape:L:D,tube=L:D,fins=N:cr:ct:s:m:t\n\
      \x20                            (m = leading-edge sweep; t = thickness, m)\n\
+     \x20 --geometry-masses <n,t,f> structural masses (kg) for --geometry;\n\
+     \x20                            replaces --dry-mass and estimates\n\
+     \x20                            --cg-dry-m/--cg-prop-m/--pitch-inertia\n\
      \x20 --duration-s <t>         total sim time [burnout + 10 s]\n\
      \x20 --dt-s <t>               output cadence [0.05]\n\
      \n\
@@ -187,6 +191,10 @@ pub(crate) struct Options {
     pub(crate) recovery_after_s: f64,
     pub(crate) airframe: Option<String>,
     pub(crate) geometry: Option<String>,
+    /// nose/tube/fins structural masses (kg) for --geometry.
+    pub(crate) geometry_masses: Option<(f64, f64, f64)>,
+    /// (casing mass kg, motor length m) retained from a motor file.
+    pub(crate) motor_casing: Option<(f64, f64)>,
     #[cfg(feature = "ballistics")]
     pub(crate) diameter_m: Option<f64>,
     #[cfg(feature = "ballistics")]
@@ -395,6 +403,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     let mut recovery_after_s = 0.0;
     let mut airframe = None;
     let mut geometry = None;
+    let mut geometry_masses = None;
     let mut runs = 32usize;
     let mut seed = 42u64;
     let mut cd_sigma = 0.03;
@@ -510,6 +519,23 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
             "--recovery-after-s" => recovery_after_s = parse_f64(&value(flag)?, flag)?,
             "--airframe" => airframe = Some(value(flag)?),
             "--geometry" => geometry = Some(value(flag)?),
+            "--geometry-masses" => {
+                let raw = value(flag)?;
+                let parts: Vec<&str> = raw.split(',').collect();
+                if parts.len() != 3 {
+                    return Err("error: --geometry-masses needs nose,tube,fins in kg".to_string());
+                }
+                let nose = parse_f64(parts[0], flag)?;
+                let tube = parse_f64(parts[1], flag)?;
+                let fins = parse_f64(parts[2], flag)?;
+                if nose <= 0.0 || tube <= 0.0 || fins < 0.0 {
+                    return Err(
+                        "error: --geometry-masses needs positive nose/tube and non-negative fins"
+                            .to_string(),
+                    );
+                }
+                geometry_masses = Some((nose, tube, fins));
+            }
             "--runs" => {
                 runs = value(flag)?
                     .parse()
@@ -589,12 +615,17 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     if !stages.is_empty() && (curve.is_some() || propellant.is_some()) {
         return Err("error: --stage replaces --curve/--propellant-mass".to_string());
     }
-    let (curve, propellant) = if let Some(file) = motor_source {
-        (file.curve.clone(), file.propellant_mass_kg)
+    let (curve, propellant, motor_casing) = if let Some(file) = motor_source {
+        let casing_kg = file.total_mass_kg - file.propellant_mass_kg;
+        (
+            file.curve.clone(),
+            file.propellant_mass_kg,
+            Some((casing_kg, file.length_mm / 1000.0)),
+        )
     } else if stages.is_empty() {
         let curve = curve.ok_or("error: --curve is required")?;
         let propellant = propellant.ok_or("error: --propellant-mass is required")?;
-        (curve, propellant)
+        (curve, propellant, None)
     } else {
         // Placeholder motor for staged mode; run_trajectory builds stages instead.
         (
@@ -610,9 +641,22 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
             ])
             .map_err(|e| format!("error: {e}"))?,
             1.0,
+            None,
         )
     };
-    let dry_mass = dry_mass.ok_or("error: --dry-mass is required")?;
+    let dry_mass = match (dry_mass, geometry_masses) {
+        (Some(_), Some(_)) => {
+            return Err("error: use either --dry-mass or --geometry-masses".to_string())
+        }
+        (Some(m), None) => m,
+        (None, Some((nose, tube, fins))) => {
+            nose + tube + fins + motor_casing.map(|c| c.0).unwrap_or(0.0)
+        }
+        (None, None) => return Err("error: --dry-mass is required".to_string()),
+    };
+    if geometry_masses.is_some() && geometry.is_none() {
+        return Err("error: --geometry-masses needs --geometry".to_string());
+    }
 
     let opts = Options {
         duration_s,
@@ -648,6 +692,8 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
         recovery_after_s,
         airframe,
         geometry,
+        geometry_masses,
+        motor_casing,
         #[cfg(feature = "ballistics")]
         diameter_m,
         #[cfg(feature = "ballistics")]
@@ -819,15 +865,13 @@ pub(crate) fn run_trajectory(
         return Err("error: use either --airframe or --geometry".to_string());
     }
     #[cfg(feature = "ballistics")]
-    let geometry_analysis = opts
+    let geometry_model = opts
         .geometry
         .as_ref()
-        .map(|spec| {
-            crate::geometry::parse_geometry(spec)
-                .map_err(fmt_err)
-                .map(|g| g.analyze())
-        })
+        .map(|spec| crate::geometry::parse_geometry(spec).map_err(fmt_err))
         .transpose()?;
+    #[cfg(feature = "ballistics")]
+    let geometry_analysis = geometry_model.as_ref().map(|g| g.analyze());
     #[cfg(feature = "ballistics")]
     let airframe = opts
         .airframe
@@ -886,6 +930,28 @@ pub(crate) fn run_trajectory(
             }
             if cp_.is_none() {
                 cp_ = Some(analysis.cp_vs_mach.clone());
+            }
+            // The motor sits at the aft end of the tube: default the
+            // propellant CG from the retained motor length.
+            if cgp.is_none() {
+                if let Some((_, length_m)) = opts.motor_casing {
+                    cgp = Some(analysis.total_length_m - length_m / 2.0);
+                }
+            }
+            if let Some((nose_kg, tube_kg, fins_kg)) = opts.geometry_masses {
+                let casing = opts
+                    .motor_casing
+                    .map(|(kg, length_m)| (kg, analysis.total_length_m - length_m / 2.0));
+                let props = geometry_model
+                    .as_ref()
+                    .expect("geometry masses imply geometry")
+                    .mass_properties(nose_kg, tube_kg, fins_kg, casing);
+                if cgd.is_none() {
+                    cgd = Some(props.dry_cg_m);
+                }
+                if pi.is_none() {
+                    pi = Some(props.pitch_inertia_kg_m2);
+                }
             }
         }
         (d, c, cn, k, cp_, cgd, cgp, pi)
@@ -1469,6 +1535,47 @@ mod tests {
         ))
         .unwrap();
         assert!(out.contains("burning"), "got {out}");
+    }
+
+    #[test]
+    fn geometry_masses_estimate_cg_and_inertia() {
+        // No --dry-mass/--cg-dry-m/--cg-prop-m/--pitch-inertia: the mass
+        // model fills them from the geometry and the motor file.
+        let out = run(&argv(
+            "simulate --motor-eng 'Estes D12 24 70 0 0.01 0.03\\n0 0\\n0.05 20\\n0.2 8\\n1.8 9\\n1.94 0' \
+             --geometry nose=conical:0.1:0.024,tube=0.4:0.024,fins=3:0.05:0.03:0.04:0.02:0.002 \
+             --geometry-masses 0.012,0.020,0.006 --weathercock --recover 0.25 \
+             --duration-s 2.0 --dt-s 0.5",
+        ))
+        .unwrap();
+        assert!(out.contains("burning"), "got {out}");
+    }
+
+    #[test]
+    fn geometry_masses_need_geometry() {
+        let err = run(&argv(
+            "simulate --curve 0:0,1:10,1.5:0 --propellant-mass 0.01 \
+             --geometry-masses 0.012,0.020,0.006",
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("--geometry-masses needs --geometry"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn geometry_masses_conflict_with_dry_mass() {
+        let err = run(&argv(
+            "simulate --curve 0:0,1:10,1.5:0 --propellant-mass 0.01 --dry-mass 0.2 \
+             --geometry nose=conical:0.1:0.024,tube=0.4:0.024,fins=3:0.05:0.03:0.04:0.02:0.002 \
+             --geometry-masses 0.012,0.020,0.006",
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("use either --dry-mass or --geometry-masses"),
+            "got {err}"
+        );
     }
 
     #[test]
