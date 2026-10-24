@@ -25,6 +25,8 @@ mod analysis;
 pub mod ballistics;
 #[cfg(any(feature = "cli", feature = "wasm"))]
 pub mod command;
+#[cfg(feature = "ballistics")]
+mod dynamics;
 mod error;
 mod flight;
 mod guidance;
@@ -32,6 +34,8 @@ mod motor;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
+#[cfg(feature = "ballistics")]
+pub use dynamics::{RollDynamics, Weathercock, WeathercockParams};
 pub use error::{Error, Result};
 pub use flight::{
     AltitudeSwitch, BoxedForces, CentralGravity, FlightState, ForceModel, IntegratorSettings,

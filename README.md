@@ -12,7 +12,7 @@ The crate is published on crates.io and consumes `ballistics-engine` 0.48.0 from
 
 ```toml
 [dependencies]
-rockets-engine = "0.5"
+rockets-engine = "0.6"
 ```
 
 ## Run
@@ -136,6 +136,12 @@ This baseline follows the thrust-curve, propellant-mass, gravity and drag struct
 - `with_atmosphere_zones` and `with_wind_segments` on `BallisticForces` expose the upstream downrange-segmented atmosphere and wind ladders, evaluated statelessly at each stage's downrange position.
 
 The atmospheric adapter uses the body's own Cd-versus-Mach curve and updates both SI mass and the engine's imperial mass mirror. It includes gravity and drag; bullet-specific reference-BC and postprocessing effects (Litz spin drift) are disabled. Standard atmosphere delegates to the upstream altitude model: humidity affects density, while this derivative path uses dry-air sound speed. Uniform atmosphere obeys the upstream direct-mode limits (`0 ≤ density < 2 kg/m³`, sound speed `> 200 m/s`); a zero density retains gravity but removes drag. `UniformGravity(Vec3::zeros())` gives an inertial vacuum.
+
+### Reduced-order dynamics (weathercock and roll)
+
+`Weathercock` is a second-order body-axis model in the guidance layer: the axis relaxes toward the relative wind with natural frequency ωₙ² = q·A·Cnα·(CP−CG)/I and damping 2ζωₙ, and the filtered axis becomes the commanded thrust axis. Positive static margin stabilizes; negative margin diverges. `WeathercockParams` takes the Cnα and CP Mach tables, a two-point CG model (dry + propellant references, mass-weighted as propellant burns), diameter, scalar pitch inertia and damping ratio. Axis and rate are snapshot-able state, updated once per public step, so choose the cadence well below the natural period. Pair with `with_body_lift` to close the loop through angle of attack. CLI: `--weathercock` with `--cna`, `--cp`, `--cg-dry-m`, `--cg-prop-m`, `--pitch-inertia`, `--damping-ratio`.
+
+`RollDynamics` is the scalar roll channel: fin-cant drive against roll damping, with an explicit equilibrium rate. Feed the resulting effective twist to `BallisticForces::set_twist` between public steps (pair with `with_spin` for length and handedness). Still not 6-DOF: no quaternion, no inertia tensor, no gyroscopic coupling.
 
 ### Modified point-mass
 

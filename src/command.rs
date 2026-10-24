@@ -82,6 +82,14 @@ fn help() -> String {
      \x20 --speed-mps <v>          initial speed along the launch axis [0]\n\
      \x20 --position-m <x,y,z>     initial position [0,0,0]\n\
      \x20 --prograde              thrust follows velocity (gravity turn)\n\
+     \x20 --weathercock           second-order body-axis dynamics toward the\n\
+     \x20                            relative wind (needs --cna, --cp, --cg-dry-m,\n\
+     \x20                            --cg-prop-m, --pitch-inertia and drag)\n\
+     \x20 --cp <mach:cp,...>       centre of pressure, m aft of nose, vs Mach\n\
+     \x20 --cg-dry-m <m>           dry-structure CG, m aft of nose\n\
+     \x20 --cg-prop-m <m>          propellant CG, m aft of nose\n\
+     \x20 --pitch-inertia <kgm2>   scalar pitch inertia about the CG\n\
+     \x20 --damping-ratio <z>      weathercock damping ratio [0.1]\n\
      \x20 --misalign <tilt:clock>  fixed thrust-axis misalignment, radians\n\
      \x20 --steering <x,y,z>       constant steering acceleration, m/s^2\n\
      \x20 --steering-cap <a>       steering magnitude cap [the steering norm]\n\
@@ -150,6 +158,12 @@ pub(crate) struct Options {
     pub(crate) format: Format,
     pub(crate) plot: bool,
     pub(crate) prograde: bool,
+    pub(crate) weathercock: bool,
+    pub(crate) cp: Option<Vec<(f64, f64)>>,
+    pub(crate) cg_dry_m: Option<f64>,
+    pub(crate) cg_prop_m: Option<f64>,
+    pub(crate) pitch_inertia: Option<f64>,
+    pub(crate) damping_ratio: f64,
     pub(crate) misalign: Option<(f64, f64)>,
     pub(crate) steering: Vec3,
     pub(crate) steering_cap: Option<f64>,
@@ -333,6 +347,12 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     let mut format = Format::Table;
     let mut plot = false;
     let mut prograde = false;
+    let mut weathercock = false;
+    let mut cp = None;
+    let mut cg_dry_m = None;
+    let mut cg_prop_m = None;
+    let mut pitch_inertia = None;
+    let mut damping_ratio = 0.1;
     let mut misalign = None;
     let mut steering = Vec3::zeros();
     let mut steering_cap = None;
@@ -419,6 +439,12 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
             }
             "--plot" => plot = true,
             "--prograde" => prograde = true,
+            "--weathercock" => weathercock = true,
+            "--cp" => cp = Some(parse_pairs(&value(flag)?, "cp")?),
+            "--cg-dry-m" => cg_dry_m = Some(parse_f64(&value(flag)?, flag)?),
+            "--cg-prop-m" => cg_prop_m = Some(parse_f64(&value(flag)?, flag)?),
+            "--pitch-inertia" => pitch_inertia = Some(parse_f64(&value(flag)?, flag)?),
+            "--damping-ratio" => damping_ratio = parse_f64(&value(flag)?, flag)?,
             "--misalign" => {
                 let pairs = parse_pairs(&value(flag)?, "misalign")?;
                 if pairs.len() != 1 {
@@ -546,6 +572,12 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
         format,
         plot,
         prograde,
+        weathercock,
+        cp,
+        cg_dry_m,
+        cg_prop_m,
+        pitch_inertia,
+        damping_ratio,
         misalign,
         steering,
         steering_cap,
@@ -725,7 +757,8 @@ pub(crate) fn run_trajectory(
         || opts.coriolis.is_some()
         || opts.tipoff.is_some()
         || opts.cna.is_some()
-        || opts.lift_k.is_some();
+        || opts.lift_k.is_some()
+        || opts.weathercock;
     #[cfg(feature = "ballistics")]
     if wants_mpm && !use_drag {
         return Err(
@@ -838,11 +871,44 @@ pub(crate) fn run_trajectory(
         );
     }
 
-    let mut guidance = BoxedGuidance(if opts.prograde {
+    let mut guidance_base: Box<dyn Guidance> = if opts.prograde {
         Box::new(ProgradeDirection::new(axis)) as Box<dyn Guidance>
     } else {
         Box::new(FixedDirection(axis)) as Box<dyn Guidance>
-    });
+    };
+    #[cfg(feature = "ballistics")]
+    if opts.weathercock {
+        let cna = opts.cna.clone().ok_or("error: --weathercock needs --cna")?;
+        let cp = opts.cp.clone().ok_or("error: --weathercock needs --cp")?;
+        let params = crate::WeathercockParams::new(
+            cna,
+            cp,
+            opts.cg_dry_m
+                .ok_or("error: --weathercock needs --cg-dry-m")?,
+            opts.cg_prop_m
+                .ok_or("error: --weathercock needs --cg-prop-m")?,
+            opts.diameter_m
+                .ok_or("error: --weathercock needs --diameter-m")?,
+            opts.pitch_inertia
+                .ok_or("error: --weathercock needs --pitch-inertia")?,
+            opts.damping_ratio,
+        )
+        .map_err(fmt_err)?;
+        guidance_base = Box::new(
+            crate::Weathercock::new(
+                params,
+                axis,
+                crate::ballistics::Atmosphere::default(),
+                opts.wind_mps,
+            )
+            .map_err(fmt_err)?,
+        );
+    }
+    #[cfg(not(feature = "ballistics"))]
+    if opts.weathercock {
+        return Err("error: --weathercock needs the 'ballistics' feature".to_string());
+    }
+    let mut guidance = BoxedGuidance(guidance_base);
     if opts.steering.norm() > 0.0 {
         guidance = BoxedGuidance(Box::new(WithSteering {
             inner: guidance,
@@ -1237,5 +1303,25 @@ mod tests {
         )))
         .unwrap();
         assert!(out.contains("burning"));
+    }
+
+    #[cfg(feature = "ballistics")]
+    #[test]
+    fn weathercock_flies_and_needs_its_parameters() {
+        let err = run(&argv(&format!(
+            "simulate --curve 0:0,0.5:200,1:0 --dry-mass 0.3 --propellant-mass 0.05 \
+             --duration-s 0.2 {DRAG} --weathercock"
+        )))
+        .unwrap_err();
+        assert!(err.contains("--cna"));
+        let out = run(&argv(&format!(
+            "simulate --curve 0:0,0.5:200,1:0 --dry-mass 0.3 --propellant-mass 0.05 \
+             --duration-s 1.0 --dt-s 0.05 --elevation-deg 80 --speed-mps 50 \
+             {DRAG} --cna 0:2,3:2 --lift-k 0:0,3:0.5 --cp 0:0.6,3:0.6 \
+             --cg-dry-m 0.3 --cg-prop-m 0.35 --pitch-inertia 0.05 \
+             --damping-ratio 0.3 --weathercock"
+        )))
+        .unwrap();
+        assert!(out.contains("burning"), "got {out}");
     }
 }

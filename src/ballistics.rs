@@ -54,7 +54,7 @@ impl Default for Atmosphere {
 }
 
 impl Atmosphere {
-    fn parameters(self) -> Result<(f64, f64, f64, f64)> {
+    pub(crate) fn parameters(self) -> Result<(f64, f64, f64, f64)> {
         match self {
             Self::Standard {
                 station_altitude_m,
@@ -95,6 +95,51 @@ impl Atmosphere {
             }
         }
     }
+}
+
+/// Local air density (kg/m³) and sound speed (m/s) for an atmosphere and its
+/// kernel parameter tuple, shared with the reduced-order dynamics models.
+pub(crate) fn local_air(
+    atmosphere: Atmosphere,
+    atmos_params: (f64, f64, f64, f64),
+    altitude_m: f64,
+) -> (f64, f64) {
+    match atmosphere {
+        Atmosphere::Standard { .. } => {
+            let (base_alt, temp_c, press_hpa, ratio) = atmos_params;
+            ballistics_engine::atmosphere::get_local_atmosphere(
+                altitude_m, base_alt, temp_c, press_hpa, ratio,
+            )
+        }
+        Atmosphere::Uniform { .. } => {
+            let (density, speed_of_sound, _, _) = atmos_params;
+            (density, speed_of_sound)
+        }
+    }
+}
+
+/// Validated Mach table with nonnegative values, shared by the lift and
+/// weathercock parameter curves.
+pub(crate) fn mach_table(pairs: Vec<(f64, f64)>, name: &'static str) -> Result<DragTable> {
+    if pairs.len() < 2 {
+        return Err(Error::invalid(name, "needs at least two Mach points"));
+    }
+    for (i, (mach, value)) in pairs.iter().enumerate() {
+        if !mach.is_finite() || *mach < 0.0 {
+            return Err(Error::invalid(name, "Mach must be finite and nonnegative"));
+        }
+        if i > 0 && *mach <= pairs[i - 1].0 {
+            return Err(Error::invalid(name, "Mach must strictly ascend"));
+        }
+        if !value.is_finite() || *value < 0.0 {
+            return Err(Error::invalid(
+                name,
+                "values must be finite and nonnegative",
+            ));
+        }
+    }
+    let (mach_values, cd_values) = pairs.into_iter().unzip();
+    Ok(DragTable::new(mach_values, cd_values))
 }
 
 /// Gravity and aerodynamic drag delegated to ballistics-engine's force kernel.
@@ -277,31 +322,22 @@ impl BallisticForces {
         induced_k_vs_mach: Vec<(f64, f64)>,
     ) -> Result<Self> {
         let table = |pairs: Vec<(f64, f64)>, name: &'static str| -> Result<DragTable> {
-            if pairs.len() < 2 {
-                return Err(Error::invalid(name, "needs at least two Mach points"));
-            }
-            for (i, (mach, value)) in pairs.iter().enumerate() {
-                if !mach.is_finite() || *mach < 0.0 {
-                    return Err(Error::invalid(name, "Mach must be finite and nonnegative"));
-                }
-                if i > 0 && *mach <= pairs[i - 1].0 {
-                    return Err(Error::invalid(name, "Mach must strictly ascend"));
-                }
-                if !value.is_finite() || *value < 0.0 {
-                    return Err(Error::invalid(
-                        name,
-                        "values must be finite and nonnegative",
-                    ));
-                }
-            }
-            let (mach_values, cd_values) = pairs.into_iter().unzip();
-            Ok(DragTable::new(mach_values, cd_values))
+            mach_table(pairs, name)
         };
         self.body_lift = Some(BodyLift {
             cna_per_rad: table(cna_vs_mach, "cna_vs_mach")?,
             induced_k_per_rad2: table(induced_k_vs_mach, "induced_k_vs_mach")?,
         });
         Ok(self)
+    }
+
+    /// Change the effective twist between public steps, for a caller-integrated
+    /// roll model (see [`crate::RollDynamics`]). Pair with [`Self::with_spin`]
+    /// for the body length and handedness; the rate must stay positive.
+    pub fn set_twist(&mut self, twist_rate_in: f64) -> Result<()> {
+        positive(twist_rate_in, "twist_rate_in")?;
+        self.inputs.twist_rate = twist_rate_in;
+        Ok(())
     }
 
     /// Downrange-segmented atmosphere (upstream `AtmoSock`): station-referenced
@@ -382,18 +418,7 @@ impl BallisticForces {
     /// Local air density (kg/m³) and sound speed (m/s) at a geometric altitude,
     /// consistent with the atmosphere handed to the kernel.
     fn local_air(&self, altitude_m: f64) -> (f64, f64) {
-        match self.atmosphere {
-            Atmosphere::Standard { .. } => {
-                let (base_alt, temp_c, press_hpa, ratio) = self.atmos_params;
-                ballistics_engine::atmosphere::get_local_atmosphere(
-                    altitude_m, base_alt, temp_c, press_hpa, ratio,
-                )
-            }
-            Atmosphere::Uniform { .. } => {
-                let (density, speed_of_sound, _, _) = self.atmos_params;
-                (density, speed_of_sound)
-            }
-        }
+        local_air(self.atmosphere, self.atmos_params, altitude_m)
     }
 
     /// Quasi-static AoA force increment: normal force toward the body-axis side of
