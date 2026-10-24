@@ -32,3 +32,36 @@ jobs:
         run: cargo check --no-default-features --features wasm,ballistics
       - name: Package inventory
         run: cargo package --list
+
+  openrocket-parity:
+    # Runs real OpenRocket 24.12 headless on its Alpha III + A8 fixture and
+    # compares our apogee against the live number (the pinned fallback in
+    # the test covers local runs). See scripts/openrocket-parity/.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Download OpenRocket 24.12
+        run: curl -sL -o "$RUNNER_TEMP/openrocket.jar" https://github.com/openrocket/openrocket/releases/download/release-24.12/OpenRocket-24.12.jar
+      - name: Run the OpenRocket fixture flight
+        id: openrocket
+        working-directory: scripts/openrocket-parity
+        run: |
+          javac -cp "$RUNNER_TEMP/openrocket.jar" Apogee.java
+          java -Djava.awt.headless=true -cp "$RUNNER_TEMP/openrocket.jar:." Apogee > out.txt
+          cat out.txt
+          apogee=$(awk '/^APOGEE / { print $2 }' out.txt)
+          test -n "$apogee"
+          echo "apogee=$apogee" >> "$GITHUB_OUTPUT"
+      - name: Sanity-check the reference
+        # Guards against a wrong/corrupt jar: the fixture apogee must land
+        # within 5% of the recorded 24.12 value (409.63 m).
+        run: awk -v a="${{ steps.openrocket.outputs.apogee }}" 'BEGIN { exit (a < 389.1 || a > 430.1) }'
+      - name: Flight parity against live OpenRocket
+        env:
+          ROCKETS_OPENROCKET_APOGEE_M: ${{ steps.openrocket.outputs.apogee }}
+        run: cargo test --all-features openrocket_flight_parity

@@ -15,6 +15,12 @@ javac -cp OpenRocket-24.12.jar Apogee.java
 java -cp OpenRocket-24.12.jar:. Apogee
 ```
 
+CI runs exactly this on every push (the `openrocket-parity` job in
+`.github/workflows/ci.yml`): it downloads the pinned jar, runs the driver,
+sanity-checks the reference within 5 % of 409.63 m, then injects the live
+apogee into the parity test via `ROCKETS_OPENROCKET_APOGEE_M`. Local test
+runs use the pinned constant when the variable is unset.
+
 Reference result (OpenRocket 24.12, 2026-10-24): **apogee 409.63 m**, max
 velocity 143.1 m/s. rockets-engine flies the same flight to 442.76 m (+8 %).
 

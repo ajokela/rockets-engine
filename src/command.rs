@@ -1556,9 +1556,15 @@ mod tests {
             .nth(1)
             .and_then(|s| s.parse().ok())
             .expect("apogee line");
+        // CI runs scripts/openrocket-parity and injects the live apogee;
+        // locally, fall back to the pinned OpenRocket 24.12 reference.
+        let reference: f64 = std::env::var("ROCKETS_OPENROCKET_APOGEE_M")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(409.63);
         assert!(
-            (apogee - 409.63).abs() / 409.63 < 0.10,
-            "apogee {apogee} vs OpenRocket 409.63"
+            (apogee - reference).abs() / reference < 0.10,
+            "apogee {apogee} vs OpenRocket {reference}"
         );
     }
 
