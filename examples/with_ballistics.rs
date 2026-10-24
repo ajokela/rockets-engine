@@ -50,11 +50,7 @@ fn main() -> Result<(), rockets_engine::Error> {
         velocity_mps: Vec3::new(2.0, 8.0, 0.0),
     };
     for _ in 0..100 {
-        let result = simulator.step(
-            &state,
-            0.05,
-            ControlInput::along(Vec3::new(0.3, 1.0, 0.0)),
-        )?;
+        let result = simulator.step(&state, 0.05, ControlInput::along(Vec3::new(0.3, 1.0, 0.0)))?;
         state = result.state;
         if state.time_s % 0.5 < 1e-9 {
             println!(
