@@ -79,6 +79,9 @@ fn help() -> String {
      \x20 --recovery-after-s <t>  absolute-time gate for deployment [0=apogee]\n\
      \x20 --airframe <preset>     sport24 or hp54: diameter, Cd, Cnα, CP, CG,\n\
      \x20                            inertia and recovery Cd·A, illustrative only\n\
+     \x20 --geometry <spec>       subsonic Barrowman modeler:\n\
+     \x20                            nose=shape:L:D,tube=L:D,fins=N:cr:ct:s:m:t\n\
+     \x20                            (m = leading-edge sweep; t = thickness, m)\n\
      \x20 --duration-s <t>         total sim time [burnout + 10 s]\n\
      \x20 --dt-s <t>               output cadence [0.05]\n\
      \n\
@@ -183,6 +186,7 @@ pub(crate) struct Options {
     pub(crate) recover: Option<f64>,
     pub(crate) recovery_after_s: f64,
     pub(crate) airframe: Option<String>,
+    pub(crate) geometry: Option<String>,
     #[cfg(feature = "ballistics")]
     pub(crate) diameter_m: Option<f64>,
     #[cfg(feature = "ballistics")]
@@ -390,6 +394,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     let mut recover = None;
     let mut recovery_after_s = 0.0;
     let mut airframe = None;
+    let mut geometry = None;
     let mut runs = 32usize;
     let mut seed = 42u64;
     let mut cd_sigma = 0.03;
@@ -504,6 +509,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
             "--recover" => recover = Some(parse_f64(&value(flag)?, flag)?),
             "--recovery-after-s" => recovery_after_s = parse_f64(&value(flag)?, flag)?,
             "--airframe" => airframe = Some(value(flag)?),
+            "--geometry" => geometry = Some(value(flag)?),
             "--runs" => {
                 runs = value(flag)?
                     .parse()
@@ -638,6 +644,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
         recover,
         recovery_after_s,
         airframe,
+        geometry,
         #[cfg(feature = "ballistics")]
         diameter_m,
         #[cfg(feature = "ballistics")]
@@ -805,6 +812,20 @@ pub(crate) fn run_trajectory(
     let duration = opts.duration_s.unwrap_or(default_duration);
 
     #[cfg(feature = "ballistics")]
+    if opts.airframe.is_some() && opts.geometry.is_some() {
+        return Err("error: use either --airframe or --geometry".to_string());
+    }
+    #[cfg(feature = "ballistics")]
+    let geometry_analysis = opts
+        .geometry
+        .as_ref()
+        .map(|spec| {
+            crate::geometry::parse_geometry(spec)
+                .map_err(fmt_err)
+                .map(|g| g.analyze())
+        })
+        .transpose()?;
+    #[cfg(feature = "ballistics")]
     let airframe = opts
         .airframe
         .as_ref()
@@ -846,6 +867,22 @@ pub(crate) fn run_trajectory(
             }
             if pi.is_none() {
                 pi = Some(af.pitch_inertia_kg_m2);
+            }
+        }
+        if let Some(analysis) = &geometry_analysis {
+            if d.is_some() || c.is_some() {
+                return Err("error: --geometry conflicts with --diameter-m/--cd".to_string());
+            }
+            d = Some(analysis.max_diameter_m);
+            c = Some(analysis.cd_vs_mach.clone());
+            if cn.is_none() {
+                cn = Some(analysis.cna_vs_mach.clone());
+            }
+            if k.is_none() {
+                k = Some(analysis.induced_k_vs_mach.clone());
+            }
+            if cp_.is_none() {
+                cp_ = Some(analysis.cp_vs_mach.clone());
             }
         }
         (d, c, cn, k, cp_, cgd, cgp, pi)
@@ -987,7 +1024,7 @@ pub(crate) fn run_trajectory(
         );
     }
     #[cfg(not(feature = "ballistics"))]
-    if opts.recover.is_some() || opts.airframe.is_some() {
+    if opts.recover.is_some() || opts.airframe.is_some() || opts.geometry.is_some() {
         return Err("error: --recover and --airframe need the 'ballistics' feature".to_string());
     }
 
@@ -1482,5 +1519,24 @@ mod tests {
         )))
         .unwrap();
         assert!(out.contains("burning"), "got {out}");
+    }
+    #[cfg(feature = "ballistics")]
+    #[test]
+    fn geometry_modeler_flies() {
+        let out = run(&argv(
+            "simulate --curve 0:0,0.5:200,1:0 --dry-mass 0.3 --propellant-mass 0.05 \
+             --duration-s 1.0 --dt-s 0.05 --elevation-deg 80 --speed-mps 50 \
+             --geometry nose=conical:0.1:0.024,tube=0.4:0.024,fins=3:0.05:0.03:0.04:0.02:0.002 \
+             --weathercock --cg-dry-m 0.3 --cg-prop-m 0.35 --pitch-inertia 0.05",
+        ))
+        .unwrap();
+        assert!(out.contains("burning"), "got {out}");
+        let err = run(&argv(
+            "simulate --curve 0:0,0.5:200,1:0 --dry-mass 0.3 --propellant-mass 0.05 \
+             --geometry nose=conical:0.1:0.024,tube=0.4:0.024,fins=3:0.05:0.03:0.04:0.02 \
+             --cd 0:0.45,1:0.5",
+        ))
+        .unwrap_err();
+        assert!(err.contains("conflicts"));
     }
 }

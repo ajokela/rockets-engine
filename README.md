@@ -12,7 +12,7 @@ The crate is published on crates.io and consumes `ballistics-engine` 0.48.0 from
 
 ```toml
 [dependencies]
-rockets-engine = "0.7"
+rockets-engine = "0.8"
 ```
 
 ## Run
@@ -142,6 +142,12 @@ The atmospheric adapter uses the body's own Cd-versus-Mach curve and updates bot
 `Weathercock` is a second-order body-axis model in the guidance layer: the axis relaxes toward the relative wind with natural frequency ωₙ² = q·A·Cnα·(CP−CG)/I and damping 2ζωₙ, and the filtered axis becomes the commanded thrust axis. Positive static margin stabilizes; negative margin diverges. `WeathercockParams` takes the Cnα and CP Mach tables, a two-point CG model (dry + propellant references, mass-weighted as propellant burns), diameter, scalar pitch inertia and damping ratio. Axis and rate are snapshot-able state, updated once per public step, so choose the cadence well below the natural period. Pair with `with_body_lift` to close the loop through angle of attack. CLI: `--weathercock` with `--cna`, `--cp`, `--cg-dry-m`, `--cg-prop-m`, `--pitch-inertia`, `--damping-ratio`.
 
 `RollDynamics` is the scalar roll channel: fin-cant drive against roll damping, with an explicit equilibrium rate. Feed the resulting effective twist to `BallisticForces::set_twist` between public steps (pair with `with_spin` for length and handedness). Still not 6-DOF: no quaternion, no inertia tensor, no gyroscopic coupling.
+
+### Geometry to aerodynamics
+
+A subsonic Barrowman modeler, implemented against the OpenRocket technical documentation and its `FinSetCalc`/`BarrowmanCalculator` sources. `RocketGeometry` (nose cone + body tube + trapezoidal fins) yields `analyze()`: Cd/Cnα/CP curves and the reference area, with `forces()` and `weathercock_params()` convenience builders. CP is the component moment sum (nose volume fraction + fin quarter-MAC); drag is Schoenherr/roughness-limited skin friction with fineness and fin-thickness corrections, base drag, and conical nose pressure. Fin normal force uses the Diederich formula with body and fin-count interference factors.
+
+Limits, deliberately: subsonic only (Mach-1 clamp), conical/ogive/elliptical/parabolic noses, trapezoidal fins, no boat-tails or transitions, no induced-drag-from-AoA model (`induced_k` stays zero — supply your own if needed). CLI: `--geometry nose=shape:L:D,tube=L:D,fins=N:cr:ct:s:m:t` with `m` the leading-edge sweep and `t` the fin thickness (metres).
 
 ### Model rockets
 

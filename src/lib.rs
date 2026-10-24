@@ -29,6 +29,8 @@ pub mod command;
 mod dynamics;
 mod error;
 mod flight;
+#[cfg(feature = "model")]
+pub mod geometry;
 mod guidance;
 #[cfg(feature = "model")]
 pub mod model_rocket;
