@@ -1539,6 +1539,31 @@ mod tests {
 
     #[cfg(feature = "ballistics")]
     #[test]
+    fn openrocket_flight_parity_alpha_iii_a8() {
+        // OpenRocket 24.12, its own Estes Alpha III fixture on its A8
+        // triangle motor: apogee 409.63 m (rounded fins, smooth finish,
+        // launch lug removed, zero wind — the configuration our geometry
+        // modeler covers). Reproduce with scripts/openrocket-parity/.
+        let out = run(&argv(
+            "simulate --motor-eng 'Estes A8 18 70 0 0.0033 0.0164\\n0 0\\n1 9\\n2 0' \
+             --geometry nose=ogive:0.07:0.024,tube=0.2:0.024,fins=3:0.05:0.03:0.05:0.02:0.0032 \
+             --geometry-masses 0.00427,0.00741,0.01306 --duration-s 15 --dt-s 0.05",
+        ))
+        .unwrap();
+        let apogee: f64 = out
+            .split_whitespace()
+            .skip_while(|t| *t != "apogee")
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .expect("apogee line");
+        assert!(
+            (apogee - 409.63).abs() / 409.63 < 0.10,
+            "apogee {apogee} vs OpenRocket 409.63"
+        );
+    }
+
+    #[cfg(feature = "ballistics")]
+    #[test]
     fn geometry_masses_estimate_cg_and_inertia() {
         // No --dry-mass/--cg-dry-m/--cg-prop-m/--pitch-inertia: the mass
         // model fills them from the geometry and the motor file.

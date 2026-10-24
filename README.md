@@ -149,7 +149,7 @@ A subsonic Barrowman modeler, implemented against the OpenRocket technical docum
 
 Limits, deliberately: subsonic only (Mach-1 clamp), conical/ogive/elliptical/parabolic noses, trapezoidal fins, no boat-tails or transitions, no induced-drag-from-AoA model (`induced_k` stays zero — supply your own if needed). CLI: `--geometry nose=shape:L:D,tube=L:D,fins=N:cr:ct:s:m:t` with `m` the leading-edge sweep and `t` the fin thickness (metres).
 
-The Cnα/CP output is validated against OpenRocket's own test suite (`tests/openrocket_parity.rs` reproduces BarrowmanCalculatorTest's Estes Alpha III values, three- and four-fin variants, within half a percent).
+The Cnα/CP output is validated against OpenRocket's own test suite (`tests/openrocket_parity.rs` reproduces BarrowmanCalculatorTest's Estes Alpha III values, three- and four-fin variants, within half a percent), and the whole flight is validated end to end: OpenRocket 24.12 flies its Alpha III fixture on its A8 motor to 409.6 m, and `openrocket_flight_parity_alpha_iii_a8` requires our apogee within 10 % of that (we fly 442.8 m). `scripts/openrocket-parity/` reproduces the OpenRocket number and documents the configuration.
 
 `RocketGeometry::mass_properties(nose_kg, tube_kg, fins_kg, casing)` completes the picture: it combines the component masses with geometry-derived CGs (solid-of-revolution nose, thin-walled tube, fin planform centroid, motor casing at the aft end) into a dry CG and a pitch-inertia estimate about that CG. CLI: `--geometry-masses nose,tube,fins` (kg) replaces `--dry-mass` and estimates `--cg-dry-m`, `--cg-prop-m` and `--pitch-inertia`, so a full weathercock flight needs only the geometry, the masses and a motor file.
 
