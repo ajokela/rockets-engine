@@ -44,3 +44,7 @@ required-features = ["cli"]
 [[example]]
 name = "boost_coast"
 required-features = ["ballistics"]
+
+[[example]]
+name = "with_ballistics"
+required-features = ["ballistics"]

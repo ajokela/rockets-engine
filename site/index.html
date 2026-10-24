@@ -77,6 +77,19 @@
   footer a:hover { text-decoration: underline; }
   .rocket-arc { display: block; width: 100%; height: auto; margin: 8px 0 4px; }
   .rocket-arc .trail { stroke: var(--edge); stroke-dasharray: 3 9; }
+  .code {
+    background: var(--panel);
+    border: 1px solid var(--edge);
+    border-radius: 8px;
+    padding: 14px 18px;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    line-height: 1.5;
+    overflow-x: auto;
+  }
+  .code-note { color: var(--dim); font-size: 0.85rem; margin-top: 8px; }
+  .code-note a { color: var(--accent2); text-decoration: none; }
+  .code-note a:hover { text-decoration: underline; }
   .rocket-arc .flame {
     animation: flicker 0.16s infinite alternate;
     transform-origin: -4px 0;
@@ -125,6 +138,46 @@
     <li><b>Reduced-order dynamics</b> — second-order weathercock with CP/CG curves and a scalar roll channel: body-axis response and spin history without a 6-DOF attitude model.</li>
     <li><b>SI throughout</b> — metres, seconds, kilograms, newtons. Simulation time in, state out; the solver owns no evolving state.</li>
   </ul>
+
+  <h2>Use them together</h2>
+  <p>The boundary: rockets-engine owns the powered flight — motor, mass, integration, guidance. ballistics-engine supplies the atmosphere and drag kernel through the adapter.</p>
+  <pre class="code"><code>use rockets_engine::{
+    ballistics::{Atmosphere, BallisticForces},
+    ControlInput, FlightState, IntegratorSettings, Motor, Rocket, Simulator,
+    ThrustCurve, ThrustPoint, Vec3,
+};
+
+fn main() -> Result<(), rockets_engine::Error> {
+    // rockets-engine: prescribed motor burn
+    let curve = ThrustCurve::new(vec![
+        ThrustPoint { time_s: 0.0, thrust_n: 0.0 },
+        ThrustPoint { time_s: 0.1, thrust_n: 20.0 },
+        ThrustPoint { time_s: 0.9, thrust_n: 15.0 },
+        ThrustPoint { time_s: 1.0, thrust_n: 0.0 },
+    ])?;
+    let rocket = Rocket::new(0.18, Some(Motor::new(curve, 0.04, 0.2)?))?;
+
+    // ballistics-engine: atmosphere + drag kernel (via the adapter)
+    let forces = BallisticForces::new(
+        0.025,
+        vec![(0.0, 0.45), (0.8, 0.5), (1.2, 0.7), (3.0, 0.4)],
+        Atmosphere::default(),
+        Vec3::new(2.0, 0.0, 0.0),
+    )?;
+
+    let sim = Simulator::new(rocket, forces, IntegratorSettings::default())?;
+    let mut state = FlightState {
+        time_s: 0.0,
+        position_m: Vec3::new(0.0, 2.0, 0.0),
+        velocity_mps: Vec3::new(2.0, 8.0, 0.0),
+    };
+    for _ in 0..100 {
+        let result = sim.step(&state, 0.05, ControlInput::along(Vec3::new(0.3, 1.0, 0.0)))?;
+        state = result.state;
+    }
+    Ok(())
+}</code></pre>
+  <p class="code-note">In Cargo.toml: <code>rockets-engine = "0.6"</code>; add <code>ballistics-engine = "=0.48.0"</code> only if you call its API directly. Full source: <a href="https://github.com/ajokela/rockets-engine/blob/main/examples/with_ballistics.rs">examples/with_ballistics.rs</a>. Flying something unpowered? Drive <a href="https://docs.rs/ballistics-engine">ballistics-engine</a> directly instead.</p>
 
   <h2>Get it</h2>
   <div class="links">
