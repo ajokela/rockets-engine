@@ -145,6 +145,94 @@ fn rail_projects_acceleration_until_exit() {
 }
 
 #[test]
+fn misalignment_is_continuous_as_the_axis_moves() {
+    // Sweep the inner axis through the old |z| = 0.9 basis-seed threshold:
+    // successive misaligned commands must not jump.
+    let mut angles = Vec::new();
+    for i in 0..=200 {
+        angles.push(-0.5 + i as f64 * 0.01);
+    }
+    let mut index = 0usize;
+    let inner = move |_ctx: GuidanceContext<'_>| {
+        let a = angles[index].to_radians();
+        index += 1;
+        // XZ sweep: |z| crosses the old 0.9 basis-seed threshold.
+        Ok(ControlInput::along(Vec3::new(a.cos(), 0.0, a.sin())))
+    };
+    let state = state(Vec3::zeros());
+    let mut g = ThrustMisalignment::new(inner, 0.02, 0.3).unwrap();
+    let mut worst = 0.0_f64;
+    let mut previous: Option<Vec3> = None;
+    for _ in 0..200 {
+        let axis = g.command(context(&state)).unwrap().thrust_direction;
+        if let Some(prev) = previous {
+            worst = worst.max((axis - prev).norm());
+        }
+        previous = Some(axis);
+    }
+    assert!(worst < 0.01, "misaligned axis jumped by {worst}");
+}
+
+#[test]
+fn steering_lag_snapshot_restores_identically() {
+    let target = Vec3::new(4.0, 0.0, 0.0);
+    let make = || {
+        SteeringLag::new(
+            move |_ctx: GuidanceContext<'_>| {
+                Ok(ControlInput {
+                    thrust_direction: Vec3::y(),
+                    steering_acceleration_mps2: target,
+                })
+            },
+            0.5,
+        )
+        .unwrap()
+    };
+    let state = state(Vec3::zeros());
+    let mut a = make();
+    for _ in 0..5 {
+        a.command(context(&state)).unwrap();
+    }
+    let snapshot = a.current();
+    let mut b = make();
+    b.set_current(snapshot);
+    for _ in 0..5 {
+        let ca = a.command(context(&state)).unwrap();
+        let cb = b.command(context(&state)).unwrap();
+        assert_eq!(ca, cb);
+    }
+}
+
+#[test]
+fn rail_validates_its_geometry() {
+    assert!(
+        RailForces::new(UniformGravity::default(), Vec3::zeros(), Vec3::zeros(), 2.0,).is_err()
+    );
+    assert!(RailForces::new(UniformGravity::default(), Vec3::zeros(), Vec3::y(), 0.0,).is_err());
+}
+
+#[test]
+fn boxed_handles_delegate() {
+    use rockets_engine::{BoxedForces, BoxedGuidance};
+    let state = state(Vec3::new(10.0, 0.0, 0.0));
+    let plain = UniformGravity::default();
+    let boxed = BoxedForces(Box::new(plain));
+    let a = plain.acceleration(&state, 1.0).unwrap();
+    let b = boxed.acceleration(&state, 1.0).unwrap();
+    assert_eq!(a, b);
+    let c = boxed
+        .acceleration_with_axis(&state, 1.0, Vec3::x())
+        .unwrap();
+    assert_eq!(a, c);
+
+    let mut plain_g = FixedDirection(Vec3::y());
+    let mut boxed_g = BoxedGuidance(Box::new(FixedDirection(Vec3::y())));
+    let a = plain_g.command(context(&state)).unwrap();
+    let b = boxed_g.command(context(&state)).unwrap();
+    assert_eq!(a, b);
+}
+
+#[test]
 fn powered_flight_stays_collinear_on_the_rail() {
     let direction = Vec3::new(0.2, 1.0, 0.0).normalize();
     let curve = ThrustCurve::new(vec![

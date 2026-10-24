@@ -386,4 +386,128 @@ mod tests {
         }
         assert!(roll.rate_rad_s().abs() < 0.01);
     }
+
+    #[test]
+    fn weathercock_snapshot_restores_identically() {
+        let make = || {
+            Weathercock::new(
+                params(0.6),
+                Vec3::new(1.0, 0.1, 0.0),
+                Atmosphere::default(),
+                Vec3::zeros(),
+            )
+            .unwrap()
+        };
+        let state = FlightState {
+            time_s: 0.0,
+            position_m: Vec3::zeros(),
+            velocity_mps: Vec3::new(100.0, 0.0, 0.0),
+        };
+        let mut a = make();
+        for _ in 0..50 {
+            a.command(context(&state)).unwrap();
+        }
+        let (axis, rate) = (a.axis(), a.rate());
+        let mut b = make();
+        b.set_state(axis, rate).unwrap();
+        for _ in 0..50 {
+            let ca = a.command(context(&state)).unwrap();
+            let cb = b.command(context(&state)).unwrap();
+            // set_state re-normalizes the restored axis, which can shift one ULP.
+            assert!(
+                (ca.thrust_direction - cb.thrust_direction).norm() < 1e-12,
+                "{ca:?} vs {cb:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn weathercock_params_validate() {
+        assert!(WeathercockParams::new(
+            vec![(0.0, 2.0)],
+            vec![(0.0, 0.6), (3.0, 0.6)],
+            0.3,
+            0.3,
+            0.1,
+            0.05,
+            0.3
+        )
+        .is_err());
+        assert!(WeathercockParams::new(
+            vec![(0.0, 2.0), (3.0, 2.0)],
+            vec![(0.0, 0.6), (3.0, 0.6)],
+            0.3,
+            0.3,
+            0.1,
+            0.0,
+            0.3
+        )
+        .is_err());
+        assert!(WeathercockParams::new(
+            vec![(0.0, 2.0), (3.0, 2.0)],
+            vec![(0.0, 0.6), (3.0, 0.6)],
+            0.3,
+            0.3,
+            0.1,
+            0.05,
+            -0.1
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn roll_params_validate() {
+        assert!(RollDynamics::new(0.02, 1.0, 0.0, 0.001, 0.1).is_err());
+        assert!(RollDynamics::new(0.02, 1.0, 1.0, 0.0, 0.1).is_err());
+        assert!(RollDynamics::new(0.02, 1.0, 1.0, 0.001, 0.0).is_err());
+    }
+
+    #[test]
+    fn underdamped_response_oscillates_near_the_natural_frequency() {
+        // A stable, undamped body released off-wind should oscillate at roughly
+        // omega_n. Measure sign changes of the off-wind component over 1 s.
+        let undamped = WeathercockParams::new(
+            vec![(0.0, 2.0), (3.0, 2.0)],
+            vec![(0.0, 0.6), (3.0, 0.6)],
+            0.3,
+            0.3,
+            0.1,
+            0.05,
+            0.0,
+        )
+        .unwrap();
+        let mut w = Weathercock::new(
+            undamped,
+            Vec3::new(1.0, 0.1, 0.0),
+            Atmosphere::default(),
+            Vec3::zeros(),
+        )
+        .unwrap();
+        let state = FlightState {
+            time_s: 0.0,
+            position_m: Vec3::zeros(),
+            velocity_mps: Vec3::new(100.0, 0.0, 0.0),
+        };
+        let steps = 100; // context.step_duration_s = 0.01, so 1 second total
+        let mut previous_sign = 1.0_f64;
+        let mut crossings = 0;
+        for _ in 0..steps {
+            w.command(context(&state)).unwrap();
+            let off = w.axis().y;
+            if off.signum() != previous_sign && off != 0.0 {
+                crossings += 1;
+                previous_sign = off.signum();
+            }
+        }
+        let q = 0.5 * 1.225 * 100.0 * 100.0;
+        let area = std::f64::consts::FRAC_PI_4 * 0.1 * 0.1;
+        let omega_n = (q * area * 2.0 * (0.6 - 0.3) / 0.05).sqrt();
+        let elapsed = steps as f64 * 0.01;
+        let expected_crossings = omega_n * elapsed / std::f64::consts::PI;
+        let ratio = crossings as f64 / expected_crossings;
+        assert!(
+            (0.75..=1.3).contains(&ratio),
+            "crossings {crossings} vs expected {expected_crossings:.1} (ratio {ratio})"
+        );
+    }
 }

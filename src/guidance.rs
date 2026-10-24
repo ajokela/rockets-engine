@@ -134,6 +134,7 @@ pub struct ThrustMisalignment<G> {
     inner: G,
     tilt_rad: f64,
     clock_rad: f64,
+    basis_u: Option<Vec3>,
 }
 
 impl<G> ThrustMisalignment<G> {
@@ -150,7 +151,18 @@ impl<G> ThrustMisalignment<G> {
             inner,
             tilt_rad,
             clock_rad,
+            basis_u: None,
         })
+    }
+
+    /// Current reference-basis vector, for snapshot/replay continuity.
+    pub fn basis_u(&self) -> Option<Vec3> {
+        self.basis_u
+    }
+
+    /// Restore a previously snapshotted reference basis (or `None` to reseed).
+    pub fn set_basis_u(&mut self, basis_u: Option<Vec3>) {
+        self.basis_u = basis_u;
     }
 }
 
@@ -161,13 +173,32 @@ impl<G: Guidance> Guidance for ThrustMisalignment<G> {
             return Ok(command);
         }
         let axis = command.thrust_direction.normalize();
-        // Deterministic orthonormal basis about the commanded axis.
-        let seed = if axis.z.abs() < 0.9 {
-            Vec3::z()
-        } else {
-            Vec3::y()
+        // Parallel-transport the previous basis when possible; seed on the
+        // first call or when the old basis degenerates against the new axis.
+        let u = match self.basis_u {
+            Some(previous) => {
+                let transported = previous - axis * axis.dot(&previous);
+                if transported.norm() > 1e-9 {
+                    transported.normalize()
+                } else {
+                    let seed = if axis.z.abs() < 0.9 {
+                        Vec3::z()
+                    } else {
+                        Vec3::y()
+                    };
+                    axis.cross(&seed).normalize()
+                }
+            }
+            None => {
+                let seed = if axis.z.abs() < 0.9 {
+                    Vec3::z()
+                } else {
+                    Vec3::y()
+                };
+                axis.cross(&seed).normalize()
+            }
         };
-        let u = axis.cross(&seed).normalize();
+        self.basis_u = Some(u);
         let v = axis.cross(&u).normalize();
         let tilt_axis = u * self.clock_rad.cos() + v * self.clock_rad.sin();
         let misaligned = axis * self.tilt_rad.cos() + tilt_axis * self.tilt_rad.sin();
