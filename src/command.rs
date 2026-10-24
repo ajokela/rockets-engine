@@ -123,6 +123,8 @@ fn help() -> String {
      \x20 --wind-zone <s:a:u:v>    downrange wind zone, repeatable:\n\
      \x20                            speed m/s, angle deg (0=headwind),\n\
      \x20                            until downrange m, vertical m/s\n\
+     \x20 --turbulence <sigma>     deterministic gust RMS per axis, m/s [0]\n\
+     \x20 --turbulence-tau <s>     gust correlation period [2.0]\n\
      \x20 --atmo-zone <t:p:h:u>    atmosphere zone, repeatable: temp C,\n\
      \x20                            pressure hPa, humidity %, until downrange m\n\
      \x20 --twist-in <in/turn>     effective spin twist; enables Magnus + yaw\n\
@@ -205,6 +207,10 @@ pub(crate) struct Options {
     pub(crate) wind_mps: Vec3,
     #[cfg(feature = "ballistics")]
     pub(crate) wind_zones: Vec<(f64, f64, f64, f64)>,
+    #[cfg(feature = "ballistics")]
+    pub(crate) turbulence: Option<(f64, f64)>,
+    #[cfg(feature = "ballistics")]
+    pub(crate) turbulence_seed: u64,
     #[cfg(feature = "ballistics")]
     pub(crate) atmo_zones: Vec<(f64, f64, f64, f64)>,
     #[cfg(feature = "ballistics")]
@@ -420,6 +426,10 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     #[cfg(feature = "ballistics")]
     let mut wind_mps = Vec3::zeros();
     #[cfg(feature = "ballistics")]
+    let mut turbulence = None;
+    #[cfg(feature = "ballistics")]
+    let mut turbulence_tau = None;
+    #[cfg(feature = "ballistics")]
     let mut wind_zones = Vec::new();
     #[cfg(feature = "ballistics")]
     let mut atmo_zones = Vec::new();
@@ -565,6 +575,10 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
             #[cfg(feature = "ballistics")]
             "--twist-in" => twist_in = Some(parse_f64(&value(flag)?, flag)?),
             #[cfg(feature = "ballistics")]
+            "--turbulence" => turbulence = Some(parse_f64(&value(flag)?, flag)?),
+            #[cfg(feature = "ballistics")]
+            "--turbulence-tau" => turbulence_tau = Some(parse_f64(&value(flag)?, flag)?),
+            #[cfg(feature = "ballistics")]
             "--body-length-m" => body_length_m = Some(parse_f64(&value(flag)?, flag)?),
             #[cfg(feature = "ballistics")]
             "--twist-left" => twist_left = true,
@@ -657,6 +671,23 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     if geometry_masses.is_some() && geometry.is_none() {
         return Err("error: --geometry-masses needs --geometry".to_string());
     }
+    #[cfg(feature = "ballistics")]
+    let turbulence = match turbulence {
+        Some(sigma) if sigma >= 0.0 => {
+            let tau = turbulence_tau.unwrap_or(2.0);
+            if tau <= 0.0 {
+                return Err("error: --turbulence-tau must be positive".to_string());
+            }
+            Some((sigma, tau))
+        }
+        Some(_) => return Err("error: --turbulence needs a nonnegative sigma".to_string()),
+        None => {
+            if turbulence_tau.is_some() {
+                return Err("error: --turbulence-tau needs --turbulence".to_string());
+            }
+            None
+        }
+    };
 
     let opts = Options {
         duration_s,
@@ -704,6 +735,10 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
         wind_mps,
         #[cfg(feature = "ballistics")]
         wind_zones,
+        #[cfg(feature = "ballistics")]
+        turbulence,
+        #[cfg(feature = "ballistics")]
+        turbulence_seed: seed,
         #[cfg(feature = "ballistics")]
         atmo_zones,
         #[cfg(feature = "ballistics")]
@@ -800,6 +835,28 @@ impl ForceModel for Forces {
             Self::Railed(f) => f.acceleration_with_axis(state, mass_kg, body_axis),
             #[cfg(feature = "ballistics")]
             Self::Recovered(f) => f.acceleration_with_axis(state, mass_kg, body_axis),
+        }
+    }
+}
+
+/// Pin the commanded axis to the rail while the rocket is on it: the rail
+/// constrains attitude as well as translation. The inner guidance does not
+/// tick on the rail, so a weathercock keeps its pad axis instead of
+/// relaxing toward a horizontal standing wind.
+struct RailedGuidance {
+    inner: Box<dyn Guidance>,
+    origin_m: Vec3,
+    direction: Vec3,
+    length_m: f64,
+}
+
+impl Guidance for RailedGuidance {
+    fn command(&mut self, context: GuidanceContext<'_>) -> crate::Result<ControlInput> {
+        let along = (context.state.position_m - self.origin_m).dot(&self.direction);
+        if along < self.length_m {
+            Ok(ControlInput::along(self.direction))
+        } else {
+            self.inner.command(context)
         }
     }
 }
@@ -1043,6 +1100,11 @@ pub(crate) fn run_trajectory(
                         .with_wind_segments(opts.wind_zones.clone())
                         .map_err(fmt_err)?;
                 }
+                if let Some((sigma, tau)) = opts.turbulence {
+                    forces = forces
+                        .with_turbulence(sigma, tau, opts.turbulence_seed)
+                        .map_err(fmt_err)?;
+                }
                 Forces::Drag(Box::new(forces))
             } else {
                 Forces::Uniform(UniformGravity::default())
@@ -1116,15 +1178,27 @@ pub(crate) fn run_trajectory(
             opts.damping_ratio,
         )
         .map_err(fmt_err)?;
-        guidance_base = Box::new(
-            crate::Weathercock::new(
-                params,
-                axis,
-                crate::ballistics::Atmosphere::default(),
-                opts.wind_mps,
-            )
-            .map_err(fmt_err)?,
-        );
+        let mut weathercock = crate::Weathercock::new(
+            params,
+            axis,
+            crate::ballistics::Atmosphere::default(),
+            opts.wind_mps,
+        )
+        .map_err(fmt_err)?;
+        if let Some((sigma, tau)) = opts.turbulence {
+            weathercock = weathercock
+                .with_turbulence(sigma, tau, opts.turbulence_seed)
+                .map_err(fmt_err)?;
+        }
+        guidance_base = Box::new(weathercock);
+    }
+    if let Some(length) = opts.rail_m {
+        guidance_base = Box::new(RailedGuidance {
+            inner: guidance_base,
+            origin_m: opts.position_m,
+            direction: axis,
+            length_m: length,
+        });
     }
     #[cfg(not(feature = "ballistics"))]
     if opts.weathercock {
@@ -1565,6 +1639,57 @@ mod tests {
         assert!(
             (apogee - reference).abs() / reference < 0.10,
             "apogee {apogee} vs OpenRocket {reference}"
+        );
+    }
+
+    #[cfg(feature = "ballistics")]
+    #[test]
+    fn turbulence_is_deterministic_per_seed() {
+        let cmd = "simulate --curve 0:0,0.5:10,1:0 --dry-mass 0.5 --propellant-mass 0.05 \
+                   --diameter-m 0.05 --cd 0:0.4,3:0.4 --wind 3,0,0 --turbulence 2 \
+                   --duration-s 5 --dt-s 0.5";
+        let a = run(&argv(cmd)).unwrap();
+        let b = run(&argv(cmd)).unwrap();
+        assert_eq!(a, b);
+        let c = run(&argv(&format!("{cmd} --seed 9"))).unwrap();
+        assert_ne!(a, c);
+    }
+
+    #[cfg(feature = "ballistics")]
+    #[test]
+    fn weathercock_flies_in_wind_with_rail_and_turbulence() {
+        // On the rail the axis is pinned (the rod constrains attitude), so
+        // a standing wind no longer tips the rocket over on the pad.
+        let cmd = "simulate --motor-eng 'Estes A8 18 70 0 0.0033 0.0164\\n0 0\\n1 9\\n2 0' \
+             --geometry nose=ogive:0.07:0.024,tube=0.2:0.024,fins=3:0.05:0.03:0.05:0.02:0.0032 \
+             --geometry-masses 0.00427,0.00741,0.01306 --weathercock --wind 4,0,0 \
+             --turbulence 1.5 --rail 1 --recover 0.25 --duration-s 20 --dt-s 0.5";
+        let out = run(&argv(cmd)).unwrap();
+        let apogee: f64 = out
+            .split_whitespace()
+            .skip_while(|t| *t != "apogee")
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .expect("apogee line");
+        assert!(apogee > 300.0, "apogee {apogee}");
+        // Deterministic per seed; a different seed gusts differently.
+        assert_eq!(out, run(&argv(cmd)).unwrap());
+        assert_ne!(out, run(&argv(&format!("{cmd} --seed 9"))).unwrap());
+    }
+
+    #[cfg(feature = "ballistics")]
+    #[test]
+    fn turbulence_validates_its_numbers() {
+        let base = "simulate --curve 0:0,1:10,1.5:0 --dry-mass 0.5 --propellant-mass 0.05 \
+                    --diameter-m 0.05 --cd 0:0.4,3:0.4";
+        let err = run(&argv(&format!("{base} --turbulence -1"))).unwrap_err();
+        assert!(err.contains("--turbulence"), "got {err}");
+        let err = run(&argv(&format!("{base} --turbulence 1 --turbulence-tau 0"))).unwrap_err();
+        assert!(err.contains("--turbulence-tau"), "got {err}");
+        let err = run(&argv(&format!("{base} --turbulence-tau 2"))).unwrap_err();
+        assert!(
+            err.contains("--turbulence-tau needs --turbulence"),
+            "got {err}"
         );
     }
 

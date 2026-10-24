@@ -73,6 +73,8 @@ pub(crate) fn dispersion(args: &[String]) -> Result<String, String> {
                 parsed.wind_sigma * rng.normal(),
             );
             opts.wind_mps += wind;
+            // Each dispersion run gets its own gust realization.
+            opts.turbulence_seed = rng.next_u64();
         }
         #[cfg(not(feature = "ballistics"))]
         let _ = &mut rng;

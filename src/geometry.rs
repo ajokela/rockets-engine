@@ -4,9 +4,9 @@
 //! sources. CP comes from the component moment sum; drag is friction + base +
 //! conical nose pressure. Supersonic values are clamped to the Mach-1 results.
 //!
-//! Not covered (deliberately): supersonic wave drag, boat-tails/transitions,
-//! elliptical or free-form fins, and induced drag from angle of attack (use
-//! `with_body_lift`'s `induced_k` table if you have a better estimate).
+//! Induced drag from angle of attack uses the normal-force tilt model
+//! (Cd += Cnα·α²). Not covered (deliberately): supersonic wave drag,
+//! boat-tails/transitions, and elliptical or free-form fins.
 
 use crate::{Error, Result};
 
@@ -422,8 +422,9 @@ impl RocketGeometry {
             let fin_cna = self.fin_set_cna(effective);
             cna_vs_mach.push((m, 2.0 + fin_cna));
             cp_vs_mach.push((m, self.total_cp(effective)));
-            // Induced drag is not part of the Barrowman model; leave zero.
-            induced_k_vs_mach.push((m, 0.0));
+            // Induced drag from the normal force's tilt onto the flight
+            // path: Cd_induced = Cnα·α², so k = Cnα (OpenRocket's model).
+            induced_k_vs_mach.push((m, 2.0 + fin_cna));
         }
         AeroAnalysis {
             cd_vs_mach,
@@ -544,7 +545,7 @@ pub struct AeroAnalysis {
     pub cna_vs_mach: Vec<(f64, f64)>,
     /// Centre of pressure, metres aft of the nose tip, vs Mach.
     pub cp_vs_mach: Vec<(f64, f64)>,
-    /// Induced-drag factor per radian² vs Mach (zero: not in the Barrowman model).
+    /// Induced-drag factor per radian² vs Mach (normal-force tilt: k = Cnα).
     pub induced_k_vs_mach: Vec<(f64, f64)>,
     /// Reference area, π/4·d² of the largest diameter.
     pub ref_area_m2: f64,
@@ -727,6 +728,16 @@ mod tests {
         // A heavier nose moves the CG forward.
         let heavy_nose = geo.mass_properties(0.024, 0.020, 0.006, None);
         assert!(heavy_nose.dry_cg_m < props.dry_cg_m);
+    }
+
+    #[test]
+    fn induced_k_tracks_cna() {
+        // Tilt model: the induced-drag factor equals the normal-force slope.
+        let geo = example();
+        let analysis = geo.analyze();
+        for ((m, k), (_, cna)) in analysis.induced_k_vs_mach.iter().zip(&analysis.cna_vs_mach) {
+            assert_eq!(k, cna, "mach {m}");
+        }
     }
 
     #[test]

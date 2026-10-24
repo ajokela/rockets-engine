@@ -149,10 +149,82 @@ pub struct BallisticForces {
     atmos_params: (f64, f64, f64, f64),
     atmosphere: Atmosphere,
     wind_mps: Vec3,
+    turbulence: Option<Turbulence>,
     omega_rps: Option<Vec3>,
     body_lift: Option<BodyLift>,
     atmo_sock: Option<AtmoSock>,
     wind_sock: Option<WindSock>,
+}
+
+/// Number of sinusoid components per axis in the turbulence gust model.
+const TURBULENCE_COMPONENTS: usize = 8;
+
+/// Deterministic frozen-field turbulence: a multisine gust per axis with a
+/// pink (1/f power) spectrum, fully fixed by its seed. Stateless, so RK4
+/// substeps, snapshots and replays all see identical wind at identical times.
+#[derive(Debug, Clone)]
+pub(crate) struct Turbulence {
+    /// Per-axis (angular frequency rad/s, amplitude m/s, phase rad) components.
+    axes: [[(f64, f64, f64); TURBULENCE_COMPONENTS]; 3],
+}
+
+impl Turbulence {
+    /// SplitMix64 finalizer as a stateless hash → [0, 1).
+    fn hash01(mut z: u64) -> f64 {
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        let z = z ^ (z >> 31);
+        (z >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// Gusts with RMS `sigma_mps` per axis and energy concentrated near the
+    /// period `tau_s` (frequencies log-spaced over [1/(10τ), 10/τ]).
+    pub(crate) fn new(sigma_mps: f64, tau_s: f64, seed: u64) -> Result<Self> {
+        if !sigma_mps.is_finite() || sigma_mps < 0.0 {
+            return Err(Error::invalid("turbulence sigma", "must be nonnegative"));
+        }
+        if !tau_s.is_finite() || tau_s <= 0.0 {
+            return Err(Error::invalid("turbulence tau", "must be positive"));
+        }
+        let lo = 0.1 / tau_s;
+        let ratio = 100.0_f64;
+        let step = ratio.powf(1.0 / (TURBULENCE_COMPONENTS - 1) as f64);
+        let norm: f64 = (0..TURBULENCE_COMPONENTS)
+            .map(|i| 1.0 / (lo * step.powi(i as i32)))
+            .sum();
+        let scale = (2.0 * sigma_mps * sigma_mps / norm).sqrt();
+        let mut axes = [[(0.0, 0.0, 0.0); TURBULENCE_COMPONENTS]; 3];
+        for (axis, comps) in axes.iter_mut().enumerate() {
+            for (i, comp) in comps.iter_mut().enumerate() {
+                let omega = lo * step.powi(i as i32);
+                let amplitude = scale / omega.sqrt();
+                let phase = 2.0
+                    * std::f64::consts::PI
+                    * Self::hash01(
+                        seed ^ 0x9E3779B97F4A7C15u64.wrapping_mul(1 + axis as u64 * 64 + i as u64),
+                    );
+                *comp = (omega, amplitude, phase);
+            }
+        }
+        Ok(Self { axes })
+    }
+
+    pub(crate) fn gust_vec(&self, t: f64) -> Vec3 {
+        Vec3::new(
+            self.axes[0]
+                .iter()
+                .map(|(w, a, p)| a * (w * t + p).sin())
+                .sum(),
+            self.axes[1]
+                .iter()
+                .map(|(w, a, p)| a * (w * t + p).sin())
+                .sum(),
+            self.axes[2]
+                .iter()
+                .map(|(w, a, p)| a * (w * t + p).sin())
+                .sum(),
+        )
+    }
 }
 
 /// Validated angle-of-attack aerodynamics: normal-force slope and induced-drag
@@ -206,6 +278,7 @@ impl BallisticForces {
             atmos_params: atmosphere.parameters()?,
             atmosphere,
             wind_mps,
+            turbulence: None,
             omega_rps: None,
             body_lift: None,
             atmo_sock: None,
@@ -407,11 +480,25 @@ impl BallisticForces {
         Ok(self)
     }
 
-    /// Wind at a stage: segmented downrange wind if configured, else the uniform vector.
+    /// Add deterministic frozen-field turbulence: multisine gusts with a
+    /// pink spectrum, RMS `sigma_mps` per axis and energy concentrated near
+    /// the period `tau_s`. `seed` fixes the phases (dispersion reseeds per
+    /// run), so runs are exactly reproducible.
+    pub fn with_turbulence(mut self, sigma_mps: f64, tau_s: f64, seed: u64) -> Result<Self> {
+        self.turbulence = Some(Turbulence::new(sigma_mps, tau_s, seed)?);
+        Ok(self)
+    }
+
+    /// Wind at a stage: segmented downrange wind if configured, else the
+    /// uniform vector; plus frozen-field turbulence if configured.
     fn effective_wind(&self, state: &FlightState) -> Vec3 {
-        match &self.wind_sock {
+        let base = match &self.wind_sock {
             Some(sock) => sock.vector_for_range_stateless(state.position_m.x),
             None => self.wind_mps,
+        };
+        match &self.turbulence {
+            Some(t) => base + t.gust_vec(state.time_s),
+            None => base,
         }
     }
 
@@ -529,5 +616,69 @@ impl ForceModel for BallisticForces {
         body_axis: Vec3,
     ) -> Result<Vec3> {
         self.acceleration_with_axis_in_wind(state, mass_kg, self.effective_wind(state), body_axis)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turbulence_rms_matches_sigma() {
+        let gust = Turbulence::new(2.5, 2.0, 42).unwrap();
+        // Long-run statistics per axis: mean ~0, RMS ~ sigma.
+        for axis in 0..3 {
+            let samples: Vec<f64> = (0..20_000)
+                .map(|i| gust.gust_vec(i as f64 * 0.05)[axis])
+                .collect();
+            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            let var =
+                samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+            assert!(mean.abs() < 0.1, "axis {axis} mean {mean}");
+            assert!(
+                (var.sqrt() - 2.5).abs() / 2.5 < 0.05,
+                "axis {axis} rms {}",
+                var.sqrt()
+            );
+        }
+    }
+
+    #[test]
+    fn turbulence_is_deterministic_per_seed() {
+        let a = Turbulence::new(1.0, 2.0, 7).unwrap();
+        let b = Turbulence::new(1.0, 2.0, 7).unwrap();
+        let c = Turbulence::new(1.0, 2.0, 8).unwrap();
+        for i in 0..100 {
+            let t = i as f64 * 0.1;
+            assert_eq!(a.gust_vec(t), b.gust_vec(t));
+        }
+        assert_ne!(a.gust_vec(3.3), c.gust_vec(3.3));
+    }
+
+    #[test]
+    fn turbulence_validates_its_numbers() {
+        assert!(Turbulence::new(-1.0, 2.0, 0).is_err());
+        assert!(Turbulence::new(1.0, 0.0, 0).is_err());
+        assert!(Turbulence::new(f64::NAN, 2.0, 0).is_err());
+    }
+
+    #[test]
+    fn turbulence_adds_to_the_effective_wind() {
+        let forces = BallisticForces::new(
+            0.05,
+            vec![(0.0, 0.4), (3.0, 0.4)],
+            Atmosphere::default(),
+            Vec3::new(3.0, 0.0, 0.0),
+        )
+        .unwrap()
+        .with_turbulence(2.0, 2.0, 42)
+        .unwrap();
+        let state = FlightState {
+            time_s: 1.7,
+            position_m: Vec3::zeros(),
+            velocity_mps: Vec3::zeros(),
+        };
+        let expected = Vec3::new(3.0, 0.0, 0.0) + forces.turbulence.as_ref().unwrap().gust_vec(1.7);
+        assert_eq!(forces.effective_wind(&state), expected);
     }
 }

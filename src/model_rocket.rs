@@ -254,7 +254,8 @@ mod recovery {
                 cg_dry_m: 0.12,
                 cg_prop_m: 0.16,
                 pitch_inertia_kg_m2: 0.004,
-                induced_k_vs_mach: vec![(0.0, 0.0), (1.0, 0.3), (3.0, 0.6)],
+                // Tilt model: induced-drag factor equals the normal-force slope.
+                induced_k_vs_mach: vec![(0.0, 12.0), (1.0, 14.0), (3.0, 10.0)],
                 recovery_cd_area_m2: 0.25,
             }
         }
@@ -269,7 +270,8 @@ mod recovery {
                 cg_dry_m: 0.28,
                 cg_prop_m: 0.36,
                 pitch_inertia_kg_m2: 0.03,
-                induced_k_vs_mach: vec![(0.0, 0.0), (1.0, 0.3), (3.0, 0.6)],
+                // Tilt model: induced-drag factor equals the normal-force slope.
+                induced_k_vs_mach: vec![(0.0, 16.0), (1.0, 18.0), (3.0, 14.0)],
                 recovery_cd_area_m2: 0.8,
             }
         }

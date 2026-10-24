@@ -83,6 +83,7 @@ pub struct Weathercock {
     atmosphere: Atmosphere,
     atmos_params: (f64, f64, f64, f64),
     wind_mps: Vec3,
+    turbulence: Option<crate::ballistics::Turbulence>,
     axis: Vec3,
     rate: Vec3,
 }
@@ -107,9 +108,18 @@ impl Weathercock {
             params,
             atmosphere,
             wind_mps,
+            turbulence: None,
             axis: initial_axis.normalize(),
             rate: Vec3::zeros(),
         })
+    }
+
+    /// Add the same deterministic frozen-field turbulence as the force
+    /// model: with equal `sigma`/`tau`/`seed` the gusts are identical, so
+    /// the axis responds to the same air the drag sees.
+    pub fn with_turbulence(mut self, sigma_mps: f64, tau_s: f64, seed: u64) -> Result<Self> {
+        self.turbulence = Some(crate::ballistics::Turbulence::new(sigma_mps, tau_s, seed)?);
+        Ok(self)
     }
 
     /// Current body axis (unit vector) — snapshot state for replay.
@@ -143,7 +153,11 @@ impl Weathercock {
 impl Guidance for Weathercock {
     fn command(&mut self, context: GuidanceContext<'_>) -> Result<ControlInput> {
         let dt = context.step_duration_s;
-        let v_air = context.state.velocity_mps - self.wind_mps;
+        let wind = match &self.turbulence {
+            Some(t) => self.wind_mps + t.gust_vec(context.state.time_s),
+            None => self.wind_mps,
+        };
+        let v_air = context.state.velocity_mps - wind;
         let speed = v_air.norm();
         if speed < 1e-9 {
             // No relative wind: no restoring torque, hold the current axis.
