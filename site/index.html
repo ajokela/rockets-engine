@@ -87,6 +87,12 @@
     line-height: 1.5;
     overflow-x: auto;
   }
+  .code .k { color: #ff7a3d; }           /* keywords */
+  .code .t { color: #5ec1ff; }           /* types */
+  .code .m { color: #c792ea; }           /* macros */
+  .code .n { color: #f2b86b; }           /* numbers */
+  .code .c { color: #5b6b80; }           /* comments */
+  .code .s { color: #9ece6a; }           /* strings */
   .code-note { color: var(--dim); font-size: 0.85rem; margin-top: 8px; }
   .code-note a { color: var(--accent2); text-decoration: none; }
   .code-note a:hover { text-decoration: underline; }
@@ -141,41 +147,41 @@
 
   <h2>Use them together</h2>
   <p>The boundary: rockets-engine owns the powered flight — motor, mass, integration, guidance. ballistics-engine supplies the atmosphere and drag kernel through the adapter.</p>
-  <pre class="code"><code>use rockets_engine::{
-    ballistics::{Atmosphere, BallisticForces},
-    ControlInput, FlightState, IntegratorSettings, Motor, Rocket, Simulator,
-    ThrustCurve, ThrustPoint, Vec3,
+  <pre class="code"><code><span class="k">use</span> <span class="t">rockets_engine</span>::{
+    ballistics::{<span class="t">Atmosphere</span>, <span class="t">BallisticForces</span>},
+    <span class="t">ControlInput</span>, <span class="t">FlightState</span>, <span class="t">IntegratorSettings</span>, <span class="t">Motor</span>, <span class="t">Rocket</span>, <span class="t">Simulator</span>,
+    <span class="t">ThrustCurve</span>, <span class="t">ThrustPoint</span>, <span class="t">Vec3</span>,
 };
 
-fn main() -> Result<(), rockets_engine::Error> {
-    // rockets-engine: prescribed motor burn
-    let curve = ThrustCurve::new(vec![
-        ThrustPoint { time_s: 0.0, thrust_n: 0.0 },
-        ThrustPoint { time_s: 0.1, thrust_n: 20.0 },
-        ThrustPoint { time_s: 0.9, thrust_n: 15.0 },
-        ThrustPoint { time_s: 1.0, thrust_n: 0.0 },
+<span class="k">fn</span> main() -> <span class="t">Result</span>&lt;(), <span class="t">rockets_engine</span>::<span class="t">Error</span>&gt; {
+    <span class="c">// rockets-engine: prescribed motor burn</span>
+    <span class="k">let</span> curve = <span class="t">ThrustCurve</span>::new(<span class="m">vec!</span>[
+        <span class="t">ThrustPoint</span> { time_s: <span class="n">0.0</span>, thrust_n: <span class="n">0.0</span> },
+        <span class="t">ThrustPoint</span> { time_s: <span class="n">0.1</span>, thrust_n: <span class="n">20.0</span> },
+        <span class="t">ThrustPoint</span> { time_s: <span class="n">0.9</span>, thrust_n: <span class="n">15.0</span> },
+        <span class="t">ThrustPoint</span> { time_s: <span class="n">1.0</span>, thrust_n: <span class="n">0.0</span> },
     ])?;
-    let rocket = Rocket::new(0.18, Some(Motor::new(curve, 0.04, 0.2)?))?;
+    <span class="k">let</span> rocket = <span class="t">Rocket</span>::new(<span class="n">0.18</span>, <span class="t">Some</span>(<span class="t">Motor</span>::new(curve, <span class="n">0.04</span>, <span class="n">0.2</span>)?))?;
 
-    // ballistics-engine: atmosphere + drag kernel (via the adapter)
-    let forces = BallisticForces::new(
-        0.025,
-        vec![(0.0, 0.45), (0.8, 0.5), (1.2, 0.7), (3.0, 0.4)],
-        Atmosphere::default(),
-        Vec3::new(2.0, 0.0, 0.0),
+    <span class="c">// ballistics-engine: atmosphere + drag kernel (via the adapter)</span>
+    <span class="k">let</span> forces = <span class="t">BallisticForces</span>::new(
+        <span class="n">0.025</span>,
+        <span class="m">vec!</span>[(<span class="n">0.0</span>, <span class="n">0.45</span>), (<span class="n">0.8</span>, <span class="n">0.5</span>), (<span class="n">1.2</span>, <span class="n">0.7</span>), (<span class="n">3.0</span>, <span class="n">0.4</span>)],
+        <span class="t">Atmosphere</span>::default(),
+        <span class="t">Vec3</span>::new(<span class="n">2.0</span>, <span class="n">0.0</span>, <span class="n">0.0</span>),
     )?;
 
-    let sim = Simulator::new(rocket, forces, IntegratorSettings::default())?;
-    let mut state = FlightState {
-        time_s: 0.0,
-        position_m: Vec3::new(0.0, 2.0, 0.0),
-        velocity_mps: Vec3::new(2.0, 8.0, 0.0),
+    <span class="k">let</span> sim = <span class="t">Simulator</span>::new(rocket, forces, <span class="t">IntegratorSettings</span>::default())?;
+    <span class="k">let</span> <span class="k">mut</span> state = <span class="t">FlightState</span> {
+        time_s: <span class="n">0.0</span>,
+        position_m: <span class="t">Vec3</span>::new(<span class="n">0.0</span>, <span class="n">2.0</span>, <span class="n">0.0</span>),
+        velocity_mps: <span class="t">Vec3</span>::new(<span class="n">2.0</span>, <span class="n">8.0</span>, <span class="n">0.0</span>),
     };
-    for _ in 0..100 {
-        let result = sim.step(&state, 0.05, ControlInput::along(Vec3::new(0.3, 1.0, 0.0)))?;
+    <span class="k">for</span> _ <span class="k">in</span> <span class="n">0</span>..<span class="n">100</span> {
+        <span class="k">let</span> result = sim.step(&state, <span class="n">0.05</span>, <span class="t">ControlInput</span>::along(<span class="t">Vec3</span>::new(<span class="n">0.3</span>, <span class="n">1.0</span>, <span class="n">0.0</span>)))?;
         state = result.state;
     }
-    Ok(())
+    <span class="t">Ok</span>(())
 }</code></pre>
   <p class="code-note">In Cargo.toml: <code>rockets-engine = "0.6"</code>; add <code>ballistics-engine = "=0.48.0"</code> only if you call its API directly. Full source: <a href="https://github.com/ajokela/rockets-engine/blob/main/examples/with_ballistics.rs">examples/with_ballistics.rs</a>. Flying something unpowered? Drive <a href="https://docs.rs/ballistics-engine">ballistics-engine</a> directly instead.</p>
 
