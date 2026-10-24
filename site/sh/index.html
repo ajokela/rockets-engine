@@ -69,6 +69,26 @@
     caret-color: var(--accent);
   }
   #status { color: var(--dim); font-size: 0.8rem; padding: 0 20px 8px; }
+  #examples {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    padding: 10px 20px 0;
+    font-size: 0.8rem;
+    color: var(--dim);
+  }
+  #examples button {
+    background: var(--panel);
+    border: 1px solid var(--edge);
+    border-radius: 6px;
+    color: var(--text);
+    font: inherit;
+    font-size: 0.8rem;
+    padding: 4px 10px;
+    cursor: pointer;
+  }
+  #examples button:hover { border-color: var(--accent); color: var(--accent); }
 </style>
 </head>
 <body>
@@ -81,6 +101,14 @@
   <a href="https://github.com/ajokela/rockets-engine">github</a>
 </header>
 <div id="screen" aria-live="polite"></div>
+<div id="examples">
+  <span>try:</span>
+  <button data-cmd="simulate --curve 0:0,0.1:20,0.9:15,1:0 --dry-mass 0.18 --propellant-mass 0.04 --ignition-s 0.2 --plot">boost + coast</button>
+  <button data-cmd="simulate --dry-mass 0.05 --stage dry=0.05,prop=0.04,curve=0:24;0.6:24,ignition=0,sep=0.7 --stage dry=0.04,prop=0.03,curve=0:16;0.5:16,ignition=0.8,sep=1.4 --stage dry=0.03,prop=0.02,curve=0:12;0.4:12,ignition=1.5 --duration-s 3 --plot">3-stage</button>
+  <button data-cmd="simulate --curve 0:0,0.5:200,1:0 --dry-mass 0.3 --propellant-mass 0.05 --elevation-deg 60 --speed-mps 50 --prograde --plot">gravity turn</button>
+  <button data-cmd="dispersion --curve 0:0,0.5:200,1:0 --dry-mass 0.3 --propellant-mass 0.05 --elevation-deg 60 --speed-mps 80 --duration-s 20 --dt-s 0.2 --runs 32">dispersion</button>
+  <button data-cmd="solve-range 500 --curve 0:0,0.05:50,0.1:0 --dry-mass 1.0 --propellant-mass 0.01 --speed-mps 120 --duration-s 60 --dt-s 0.1">solve-range 500 m</button>
+</div>
 <div id="prompt-row">
   <span id="prompt">rockets$</span>
   <input id="cmd" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" autofocus>
@@ -198,6 +226,12 @@ input.addEventListener('keydown', (e) => {
 });
 
 document.getElementById('screen').addEventListener('click', () => input.focus());
+for (const button of document.querySelectorAll('#examples button')) {
+  button.addEventListener('click', () => {
+    input.value = button.dataset.cmd;
+    input.focus();
+  });
+}
 </script>
 </body>
 </html>

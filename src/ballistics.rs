@@ -9,8 +9,12 @@
 
 use crate::{finite_vec, positive, Error, FlightState, ForceModel, Result, Vec3};
 use ballistics_engine::{
-    atmosphere::calculate_air_density_cimp, constants::GRAINS_TO_KG,
-    derivatives::compute_derivatives, drag::DragTable, BallisticInputs,
+    atmosphere::{calculate_air_density_cimp, AtmoSock},
+    constants::GRAINS_TO_KG,
+    derivatives::compute_derivatives,
+    drag::DragTable,
+    wind::{WindSegment, WindSock},
+    BallisticInputs,
 };
 
 /// Atmospheric inputs supported by the upstream derivative kernel.
@@ -102,6 +106,8 @@ pub struct BallisticForces {
     wind_mps: Vec3,
     omega_rps: Option<Vec3>,
     body_lift: Option<BodyLift>,
+    atmo_sock: Option<AtmoSock>,
+    wind_sock: Option<WindSock>,
 }
 
 /// Validated angle-of-attack aerodynamics: normal-force slope and induced-drag
@@ -157,6 +163,8 @@ impl BallisticForces {
             wind_mps,
             omega_rps: None,
             body_lift: None,
+            atmo_sock: None,
+            wind_sock: None,
         })
     }
 
@@ -296,6 +304,81 @@ impl BallisticForces {
         Ok(self)
     }
 
+    /// Downrange-segmented atmosphere (upstream `AtmoSock`): station-referenced
+    /// zones, each `(temperature_c, pressure_hpa, humidity_percent, until_downrange_m)`.
+    /// The zone is selected by downrange distance `position.x`; the base atmosphere
+    /// must be [`Atmosphere::Standard`], and each zone's humidity applies to its
+    /// station density while this derivative path uses dry-air sound speed.
+    pub fn with_atmosphere_zones(mut self, zones: Vec<(f64, f64, f64, f64)>) -> Result<Self> {
+        if !matches!(self.atmosphere, Atmosphere::Standard { .. }) {
+            return Err(Error::invalid(
+                "atmosphere zones",
+                "require the Standard atmosphere, not Uniform",
+            ));
+        }
+        if zones.is_empty() {
+            return Err(Error::invalid(
+                "atmosphere zones",
+                "needs at least one zone",
+            ));
+        }
+        for (temp_c, pressure_hpa, humidity, until_m) in &zones {
+            if !temp_c.is_finite()
+                || !pressure_hpa.is_finite()
+                || *pressure_hpa <= 0.0
+                || !humidity.is_finite()
+                || !(0.0..=100.0).contains(humidity)
+                || !until_m.is_finite()
+                || *until_m <= 0.0
+            {
+                return Err(Error::invalid(
+                    "atmosphere zone",
+                    "needs finite temperature, positive pressure, humidity in [0, 100] and positive until_m",
+                ));
+            }
+        }
+        self.atmo_sock = Some(AtmoSock::new(zones));
+        Ok(self)
+    }
+
+    /// Downrange-segmented wind (upstream `WindSock`). Each zone is
+    /// `(speed_mps, angle_deg, until_downrange_m, vertical_mps)`, with the angle
+    /// following the upstream wind-FROM convention (0° = headwind, 90° = from the
+    /// right). Vertical is positive updraft. Zones are evaluated statelessly at
+    /// each stage's `position.x`, so wind can change mid-integration.
+    /// Overrides the uniform wind set in [`Self::new`]/[`Self::set_wind`].
+    pub fn with_wind_segments(mut self, zones: Vec<(f64, f64, f64, f64)>) -> Result<Self> {
+        if zones.is_empty() {
+            return Err(Error::invalid(
+                "wind segments",
+                "needs at least one segment",
+            ));
+        }
+        let segments: Vec<WindSegment> = zones
+            .into_iter()
+            .map(
+                |(speed_mps, angle_deg, until_m, vertical_mps)| WindSegment {
+                    speed_kmh: speed_mps * 3.6,
+                    angle_deg,
+                    until_m,
+                    vertical_mps,
+                },
+            )
+            .collect();
+        let sock = WindSock::try_new(segments)
+            .map_err(|e| Error::Model(format!("invalid wind segments: {e:?}")))?;
+        self.wind_sock = Some(sock);
+        Ok(self)
+    }
+
+    /// Wind at a stage: segmented downrange wind if configured, else the uniform vector.
+    fn effective_wind(&self, state: &FlightState) -> Vec3 {
+        match &self.wind_sock {
+            Some(sock) => sock.vector_for_range_stateless(state.position_m.x),
+            None => self.wind_mps,
+        }
+    }
+
     /// Local air density (kg/m³) and sound speed (m/s) at a geometric altitude,
     /// consistent with the atmosphere handed to the kernel.
     fn local_air(&self, altitude_m: f64) -> (f64, f64) {
@@ -397,7 +480,7 @@ impl BallisticForces {
             inputs.bc_value,
             self.omega_rps,
             state.time_s,
-            None,
+            self.atmo_sock.as_ref(),
         );
         let acceleration = Vec3::new(derivatives[3], derivatives[4], derivatives[5]);
         if !finite_vec(&acceleration) {
@@ -411,7 +494,7 @@ impl BallisticForces {
 
 impl ForceModel for BallisticForces {
     fn acceleration(&self, state: &FlightState, mass_kg: f64) -> Result<Vec3> {
-        self.acceleration_in_wind(state, mass_kg, self.wind_mps)
+        self.acceleration_in_wind(state, mass_kg, self.effective_wind(state))
     }
 
     fn acceleration_with_axis(
@@ -420,6 +503,6 @@ impl ForceModel for BallisticForces {
         mass_kg: f64,
         body_axis: Vec3,
     ) -> Result<Vec3> {
-        self.acceleration_with_axis_in_wind(state, mass_kg, self.wind_mps, body_axis)
+        self.acceleration_with_axis_in_wind(state, mass_kg, self.effective_wind(state), body_axis)
     }
 }

@@ -19,6 +19,8 @@
 #![warn(missing_docs)]
 #![doc = include_str!("../README.md")]
 
+#[cfg(any(feature = "cli", feature = "wasm"))]
+mod analysis;
 #[cfg(feature = "ballistics")]
 pub mod ballistics;
 #[cfg(any(feature = "cli", feature = "wasm"))]
@@ -32,10 +34,13 @@ pub mod wasm;
 
 pub use error::{Error, Result};
 pub use flight::{
-    AltitudeSwitch, CentralGravity, FlightState, ForceModel, IntegratorSettings, Simulator,
-    StepResult, UniformGravity, EARTH_MU_M3_S2,
+    AltitudeSwitch, BoxedForces, CentralGravity, FlightState, ForceModel, IntegratorSettings,
+    RailForces, Simulator, StepResult, UniformGravity, EARTH_MU_M3_S2,
 };
-pub use guidance::{ControlInput, FixedDirection, Guidance, GuidanceContext};
+pub use guidance::{
+    BoxedGuidance, ControlInput, FixedDirection, Guidance, GuidanceContext, ProgradeDirection,
+    SteeringLag, ThrustMisalignment,
+};
 pub use motor::{
     Motor, MotorPhase, MotorSample, Rocket, RocketSample, Stage, ThrustCurve, ThrustPoint,
 };

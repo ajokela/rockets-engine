@@ -57,6 +57,32 @@ where
     }
 }
 
+/// Owned, type-erased force-model handle for heterogeneous model composition.
+/// A newtype rather than `Box<dyn ForceModel>` so it cannot collide with the
+/// blanket closure implementations.
+pub struct BoxedForces(pub Box<dyn ForceModel>);
+
+impl std::fmt::Debug for BoxedForces {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoxedForces").finish_non_exhaustive()
+    }
+}
+
+impl ForceModel for BoxedForces {
+    fn acceleration(&self, state: &FlightState, mass_kg: f64) -> Result<Vec3> {
+        self.0.acceleration(state, mass_kg)
+    }
+
+    fn acceleration_with_axis(
+        &self,
+        state: &FlightState,
+        mass_kg: f64,
+        body_axis: Vec3,
+    ) -> Result<Vec3> {
+        self.0.acceleration_with_axis(state, mass_kg, body_axis)
+    }
+}
+
 /// Constant gravity with no atmosphere. Use a zero vector for an inertial vacuum.
 #[derive(Debug, Clone, Copy)]
 pub struct UniformGravity(pub Vec3);
@@ -179,6 +205,71 @@ impl<Below: ForceModel, Above: ForceModel> ForceModel for AltitudeSwitch<Below, 
         } else {
             self.above.acceleration(state, mass_kg)
         }
+    }
+}
+
+/// Launch-rail constraint: a force-model wrapper that projects environmental
+/// acceleration onto the rail direction while the vehicle is on the rail.
+///
+/// The rail is a segment starting at `origin_m` and running `length_m` along
+/// `direction`. If the initial velocity is zero or along the rail, motion stays
+/// exactly on the rail because every acceleration is collinear with it. After
+/// rail exit the inner model passes through unchanged. Command the thrust axis
+/// along the rail and no steering until exit; pair with
+/// [`crate::ballistics::BallisticForces::with_tipoff_yaw`] for the exit disturbance.
+#[derive(Debug, Clone)]
+pub struct RailForces<F> {
+    inner: F,
+    origin_m: Vec3,
+    direction: Vec3,
+    length_m: f64,
+}
+
+impl<F> RailForces<F> {
+    /// Build a rail. `direction` is normalized at construction and must be
+    /// nonzero and finite; `length_m` must be finite and positive.
+    pub fn new(inner: F, origin_m: Vec3, direction: Vec3, length_m: f64) -> Result<Self> {
+        if !finite_vec(&origin_m) || !finite_vec(&direction) || direction.amax() == 0.0 {
+            return Err(Error::invalid(
+                "rail",
+                "origin must be finite, direction nonzero",
+            ));
+        }
+        positive(length_m, "rail length_m")?;
+        Ok(Self {
+            inner,
+            origin_m,
+            direction: direction.normalize(),
+            length_m,
+        })
+    }
+
+    fn constrain(&self, state: &FlightState, acceleration: Vec3) -> Vec3 {
+        let along = (state.position_m - self.origin_m).dot(&self.direction);
+        if along < self.length_m {
+            self.direction * acceleration.dot(&self.direction)
+        } else {
+            acceleration
+        }
+    }
+}
+
+impl<F: ForceModel> ForceModel for RailForces<F> {
+    fn acceleration(&self, state: &FlightState, mass_kg: f64) -> Result<Vec3> {
+        let a = self.inner.acceleration(state, mass_kg)?;
+        Ok(self.constrain(state, a))
+    }
+
+    fn acceleration_with_axis(
+        &self,
+        state: &FlightState,
+        mass_kg: f64,
+        body_axis: Vec3,
+    ) -> Result<Vec3> {
+        let a = self
+            .inner
+            .acceleration_with_axis(state, mass_kg, body_axis)?;
+        Ok(self.constrain(state, a))
     }
 }
 

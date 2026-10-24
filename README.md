@@ -1,5 +1,9 @@
 # rockets-engine
 
+[![crates.io](https://img.shields.io/crates/v/rockets-engine.svg)](https://crates.io/crates/rockets-engine)
+[![docs.rs](https://docs.rs/rockets-engine/badge.svg)](https://docs.rs/rockets-engine)
+[![CI](https://github.com/ajokela/rockets-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/ajokela/rockets-engine/actions/workflows/ci.yml)
+
 A Rust companion to [`ballistics-engine`](https://crates.io/crates/ballistics-engine) for powered, three-dimensional point-mass flight. It adds prescribed motor burns, changing mass, incremental RK4 integration and application-owned guidance hooks. The default adapter calls the existing ballistics-engine gravity/drag derivative function; it does not fork or modify that engine.
 
 The crate is published on crates.io and consumes `ballistics-engine` 0.48.0 from crates.io. Rust 1.99.1 is pinned for development, matching the game workspace.
@@ -8,7 +12,7 @@ The crate is published on crates.io and consumes `ballistics-engine` 0.48.0 from
 
 ```toml
 [dependencies]
-rockets-engine = "0.4"
+rockets-engine = "0.5"
 ```
 
 ## Run
@@ -33,7 +37,14 @@ cargo install rockets-engine --features cli
 rockets simulate --curve 0:0,0.1:20,0.9:15,1:0 --dry-mass 0.18 --propellant-mass 0.04 --ignition-s 0.2 --plot
 ```
 
-`simulate` prints the trajectory as a table, CSV or JSON, with an optional ASCII altitude chart. Add `--diameter-m` and `--cd` to fly against the ballistics-engine atmosphere and drag kernel, `--wind` for moving air, and `--elevation-deg`/`--azimuth-deg`/`--speed-mps` to aim the launch. `rockets help` lists every option.
+`simulate` prints the trajectory as a table, CSV or JSON, with an optional ASCII altitude chart and an apogee/impact summary. Add `--diameter-m` and `--cd` to fly against the ballistics-engine atmosphere and drag kernel, `--wind` for moving air, and `--elevation-deg`/`--azimuth-deg`/`--speed-mps` to aim the launch. `rockets help` lists every option.
+
+Two analysis commands build on the same options:
+
+- `dispersion` runs Monte Carlo samples with lognormal Cd-scale, per-axis wind and fractional speed perturbations (`--runs`, `--seed`, `--cd-sigma`, `--wind-sigma`, `--speed-sigma`) and reports apogee/range statistics and impact CEP. Deterministic per seed; no external RNG dependency.
+- `solve-range <metres>` bisects launch elevation to hit a downrange ground target on the low-angle branch (`--high-angle` for the other solution) and prints the elevation, range, apogee and impact speed.
+
+`--stage` builds serial or parallel staged vehicles from the terminal: each `--stage dry=kg,prop=kg,curve=t:N;t:N,ignition=s,sep=s` adds a stage with its own motor schedule and optional separation. `--gravity central|vacuum` and `--space-above-m` cover central-gravity and atmosphere/space-switching flights.
 
 ## Browser terminal
 
@@ -114,6 +125,15 @@ This baseline follows the thrust-curve, propellant-mass, gravity and drag struct
 - `steering_acceleration_mps2` is a world-frame acceleration supplied by an external actuator/control model. The solver caps its vector magnitude using `max_steering_accel_mps2`, which defaults to zero. It may act during coast; its physical availability and direction are the caller's responsibility.
 - The core has no target, seeker, interception or Godot entity types. Controllers can own their own state and inputs without changing the integrator.
 - `ForceModel::acceleration` supplies environmental acceleration at each RK4 stage with that stage's current mass. A closure can implement this hook too. Keep it deterministic and free of side effects. `BallisticForces::acceleration_in_wind` supports wrappers that sample spatial or time-dependent wind.
+
+### Guidance and constraint composition
+
+- `ProgradeDirection` follows the velocity vector (gravity turns), with a fallback axis at rest.
+- `ThrustMisalignment` decorates any guidance source with a fixed tilt/clock boresight error — the dominant real-world dispersion term for unguided rockets.
+- `SteeringLag` adds a first-order actuator time constant to steering acceleration; its lagged state is snapshot-able for replay.
+- `RailForces` wraps any force model and projects environmental acceleration onto a launch rail until exit; command the thrust axis along the rail and no steering until exit, then let tip-off take over.
+- `BoxedGuidance`/`BoxedForces` are type-erased handles for heterogeneous decorator/model chains.
+- `with_atmosphere_zones` and `with_wind_segments` on `BallisticForces` expose the upstream downrange-segmented atmosphere and wind ladders, evaluated statelessly at each stage's downrange position.
 
 The atmospheric adapter uses the body's own Cd-versus-Mach curve and updates both SI mass and the engine's imperial mass mirror. It includes gravity and drag; bullet-specific reference-BC and postprocessing effects (Litz spin drift) are disabled. Standard atmosphere delegates to the upstream altitude model: humidity affects density, while this derivative path uses dry-air sound speed. Uniform atmosphere obeys the upstream direct-mode limits (`0 ≤ density < 2 kg/m³`, sound speed `> 200 m/s`); a zero density retains gravity but removes drag. `UniformGravity(Vec3::zeros())` gives an inertial vacuum.
 

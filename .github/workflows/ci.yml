@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Test (all features)
+        run: cargo test --all-features
+      - name: Test (no default features)
+        run: cargo test --no-default-features
+      - name: Test (cli)
+        run: cargo test --no-default-features --features cli
+      - name: Test (ballistics)
+        run: cargo test --no-default-features --features ballistics
+      - name: Test (serde)
+        run: cargo test --no-default-features --features serde
+      - name: Package inventory
+        run: cargo package --list
