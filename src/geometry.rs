@@ -41,7 +41,6 @@ impl std::str::FromStr for NoseShape {
 }
 
 impl NoseShape {
-
     /// CP location as a fraction of nose length, from the volume/area relation
     /// XB = L − V/A_base. Ogive uses the standard tangent-ogive value.
     fn cp_fraction(self) -> f64 {
