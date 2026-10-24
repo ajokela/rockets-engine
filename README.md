@@ -12,7 +12,7 @@ The crate is published on crates.io and consumes `ballistics-engine` 0.48.0 from
 
 ```toml
 [dependencies]
-rockets-engine = "0.6"
+rockets-engine = "0.7"
 ```
 
 ## Run
@@ -142,6 +142,14 @@ The atmospheric adapter uses the body's own Cd-versus-Mach curve and updates bot
 `Weathercock` is a second-order body-axis model in the guidance layer: the axis relaxes toward the relative wind with natural frequency ωₙ² = q·A·Cnα·(CP−CG)/I and damping 2ζωₙ, and the filtered axis becomes the commanded thrust axis. Positive static margin stabilizes; negative margin diverges. `WeathercockParams` takes the Cnα and CP Mach tables, a two-point CG model (dry + propellant references, mass-weighted as propellant burns), diameter, scalar pitch inertia and damping ratio. Axis and rate are snapshot-able state, updated once per public step, so choose the cadence well below the natural period. Pair with `with_body_lift` to close the loop through angle of attack. CLI: `--weathercock` with `--cna`, `--cp`, `--cg-dry-m`, `--cg-prop-m`, `--pitch-inertia`, `--damping-ratio`.
 
 `RollDynamics` is the scalar roll channel: fin-cant drive against roll damping, with an explicit equilibrium rate. Feed the resulting effective twist to `BallisticForces::set_twist` between public steps (pair with `with_spin` for length and handedness). Still not 6-DOF: no quaternion, no inertia tensor, no gyroscopic coupling.
+
+### Model rockets
+
+The `model` feature (default on) adds hobbyist conveniences:
+
+- `MotorFile` parses RASP `.eng` motor text — manufacturer, designation, diameter/length, delays, propellant and total masses, and the thrust samples. `motor(ignition_s)` schedules it. `--motor-eng` takes inline text; `--motor-file` reads from disk in the native CLI.
+- `RecoveryForces` wraps any force model and swaps in recovery drag once the vehicle is descending, with an optional absolute-time deployment gate (`--recover <cdA>`, `--recovery-after-s <t>`). Terminal velocity `sqrt(2mg/(ρ·CdA))` emerges naturally. Deployment is a pure function of state, so integration stays deterministic.
+- `Airframe::sport_24mm()` and `Airframe::high_power_54mm()` are *illustrative* presets (not measured kit data): diameter, Cd, Cnα, CP, CG, pitch inertia, induced-k and recovery Cd·A in one bundle. `--airframe sport24` or `hp54` fills the same options and composes with `--weathercock`.
 
 ### Modified point-mass
 

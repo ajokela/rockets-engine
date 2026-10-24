@@ -112,7 +112,7 @@
 <body>
 <main>
   <header>
-    <h1>rockets-engine <span class="ver">v0.6.1</span></h1>
+    <h1>rockets-engine <span class="ver">v0.7.0</span></h1>
     <p class="tagline">Point-mass powered flight for Rust — prescribed motor burns, staging and guidance hooks on the ballistics-engine force kernel.</p>
     <svg class="rocket-arc" viewBox="0 0 780 170" aria-hidden="true">
       <path id="flight" class="trail" d="M -50 160 Q 390 -80 830 160" fill="none" stroke-width="1.5"/>
@@ -129,7 +129,7 @@
     </svg>
   </header>
 
-  <div class="install"><span class="p"># Cargo.toml</span><br>rockets-engine = "0.6"</div>
+  <div class="install"><span class="p"># Cargo.toml</span><br>rockets-engine = "0.7"</div>
 
   <h2>What it does</h2>
   <ul>
@@ -142,6 +142,7 @@
     <li><b>CLI &amp; browser terminal</b> — <code>cargo install rockets-engine --features cli</code> for the <code>rockets</code> tool, or fly it in <a href="/sh/" style="color:var(--accent2)">the browser terminal</a>; one shared parser, native and WASM. Monte-Carlo dispersion and elevation solving built in.</li>
     <li><b>Guidance composition</b> — prograde gravity turns, thrust-misalignment dispersion, actuator lag and launch rails, with downrange-segmented atmosphere and wind.</li>
     <li><b>Reduced-order dynamics</b> — second-order weathercock with CP/CG curves and a scalar roll channel: body-axis response and spin history without a 6-DOF attitude model.</li>
+    <li><b>Model-rocket pack</b> — RASP .eng motor files, apogee parachute recovery with natural terminal velocity, and illustrative 24/54 mm airframe presets.</li>
     <li><b>SI throughout</b> — metres, seconds, kilograms, newtons. Simulation time in, state out; the solver owns no evolving state.</li>
   </ul>
 

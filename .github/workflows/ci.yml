@@ -26,6 +26,8 @@ jobs:
         run: cargo test --no-default-features --features ballistics
       - name: Test (serde)
         run: cargo test --no-default-features --features serde
+      - name: Test (model)
+        run: cargo test --no-default-features --features model
       - name: Check (wasm bindings)
         run: cargo check --no-default-features --features wasm,ballistics
       - name: Package inventory

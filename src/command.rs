@@ -73,6 +73,12 @@ fn help() -> String {
      \x20 --stage <spec>          repeat for staging; replaces the single-motor\n\
      \x20                            options. spec: dry=kg,prop=kg,curve=t:N;t:N,\n\
      \x20                            ignition=s,sep=s (curve/ignition/sep optional)\n\
+     \x20 --motor-eng <text>      inline RASP .eng motor text (curve + propellant)\n\
+     \x20 --motor-file <path>     .eng file on disk (native CLI only)\n\
+     \x20 --recover <cdA>         parachute Cd·A in m²; recovery drag on descent\n\
+     \x20 --recovery-after-s <t>  absolute-time gate for deployment [0=apogee]\n\
+     \x20 --airframe <preset>     sport24 or hp54: diameter, Cd, Cnα, CP, CG,\n\
+     \x20                            inertia and recovery Cd·A, illustrative only\n\
      \x20 --duration-s <t>         total sim time [burnout + 10 s]\n\
      \x20 --dt-s <t>               output cadence [0.05]\n\
      \n\
@@ -174,6 +180,9 @@ pub(crate) struct Options {
     pub(crate) center: Vec3,
     pub(crate) space_above_m: Option<f64>,
     pub(crate) stages: Vec<StageSpec>,
+    pub(crate) recover: Option<f64>,
+    pub(crate) recovery_after_s: f64,
+    pub(crate) airframe: Option<String>,
     #[cfg(feature = "ballistics")]
     pub(crate) diameter_m: Option<f64>,
     #[cfg(feature = "ballistics")]
@@ -276,6 +285,19 @@ fn parse_quad(spec: &str, what: &str) -> Result<(f64, f64, f64, f64), String> {
     Ok((v[0], v[1], v[2], v[3]))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn load_motor_file(path: &str) -> Result<crate::model_rocket::MotorFile, String> {
+    crate::model_rocket::MotorFile::from_path(path).map_err(fmt_err)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn load_motor_file(_path: &str) -> Result<crate::model_rocket::MotorFile, String> {
+    Err(
+        "error: --motor-file needs the native CLI; use --motor-eng with inline RASP text"
+            .to_string(),
+    )
+}
+
 fn parse_stage(spec: &str) -> Result<StageSpec, String> {
     let mut dry_mass = None;
     let mut propellant = None;
@@ -363,6 +385,11 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     let mut center = Vec3::zeros();
     let mut space_above_m = None;
     let mut stages = Vec::new();
+    let mut motor_eng = None;
+    let mut motor_file = None;
+    let mut recover = None;
+    let mut recovery_after_s = 0.0;
+    let mut airframe = None;
     let mut runs = 32usize;
     let mut seed = 42u64;
     let mut cd_sigma = 0.03;
@@ -472,6 +499,11 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
             "--center" => center = parse_vec3(&value(flag)?, flag)?,
             "--space-above-m" => space_above_m = Some(parse_f64(&value(flag)?, flag)?),
             "--stage" => stages.push(parse_stage(&value(flag)?)?),
+            "--motor-eng" => motor_eng = Some(value(flag)?),
+            "--motor-file" => motor_file = Some(value(flag)?),
+            "--recover" => recover = Some(parse_f64(&value(flag)?, flag)?),
+            "--recovery-after-s" => recovery_after_s = parse_f64(&value(flag)?, flag)?,
+            "--airframe" => airframe = Some(value(flag)?),
             "--runs" => {
                 runs = value(flag)?
                     .parse()
@@ -532,10 +564,25 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
         i += 1;
     }
 
+    let motor_source = match (motor_eng, motor_file) {
+        (Some(_), Some(_)) => {
+            return Err("error: use only one of --motor-eng and --motor-file".to_string())
+        }
+        (Some(text), None) => Some(crate::model_rocket::MotorFile::parse(&text).map_err(fmt_err)?),
+        (None, Some(path)) => Some(load_motor_file(&path)?),
+        (None, None) => None,
+    };
+    if motor_source.is_some() && (curve.is_some() || propellant.is_some() || !stages.is_empty()) {
+        return Err(
+            "error: a motor file replaces --curve/--propellant-mass and --stage".to_string(),
+        );
+    }
     if !stages.is_empty() && (curve.is_some() || propellant.is_some()) {
         return Err("error: --stage replaces --curve/--propellant-mass".to_string());
     }
-    let (curve, propellant) = if stages.is_empty() {
+    let (curve, propellant) = if let Some(file) = motor_source {
+        (file.curve.clone(), file.propellant_mass_kg)
+    } else if stages.is_empty() {
         let curve = curve.ok_or("error: --curve is required")?;
         let propellant = propellant.ok_or("error: --propellant-mass is required")?;
         (curve, propellant)
@@ -588,6 +635,9 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
         center,
         space_above_m,
         stages,
+        recover,
+        recovery_after_s,
+        airframe,
         #[cfg(feature = "ballistics")]
         diameter_m,
         #[cfg(feature = "ballistics")]
@@ -661,6 +711,8 @@ enum Forces {
     Drag(Box<crate::ballistics::BallisticForces>),
     Switched(AltitudeSwitch<BoxedForces, BoxedForces>),
     Railed(RailForces<BoxedForces>),
+    #[cfg(feature = "ballistics")]
+    Recovered(crate::RecoveryForces<BoxedForces>),
 }
 
 impl ForceModel for Forces {
@@ -672,6 +724,8 @@ impl ForceModel for Forces {
             Self::Drag(f) => f.acceleration(state, mass_kg),
             Self::Switched(f) => f.acceleration(state, mass_kg),
             Self::Railed(f) => f.acceleration(state, mass_kg),
+            #[cfg(feature = "ballistics")]
+            Self::Recovered(f) => f.acceleration(state, mass_kg),
         }
     }
 
@@ -688,6 +742,8 @@ impl ForceModel for Forces {
             Self::Drag(f) => f.acceleration_with_axis(state, mass_kg, body_axis),
             Self::Switched(f) => f.acceleration_with_axis(state, mass_kg, body_axis),
             Self::Railed(f) => f.acceleration_with_axis(state, mass_kg, body_axis),
+            #[cfg(feature = "ballistics")]
+            Self::Recovered(f) => f.acceleration_with_axis(state, mass_kg, body_axis),
         }
     }
 }
@@ -749,15 +805,61 @@ pub(crate) fn run_trajectory(
     let duration = opts.duration_s.unwrap_or(default_duration);
 
     #[cfg(feature = "ballistics")]
-    let use_drag = opts.diameter_m.is_some() || opts.cd.is_some();
+    let airframe = opts
+        .airframe
+        .as_ref()
+        .map(|name| {
+            crate::Airframe::by_name(name)
+                .ok_or_else(|| format!("error: unknown airframe '{name}' (sport24 or hp54)"))
+        })
+        .transpose()?;
+    #[cfg(feature = "ballistics")]
+    let (diameter_m, cd, cna, lift_k, cp, cg_dry_m, cg_prop_m, pitch_inertia) = {
+        let mut d = opts.diameter_m;
+        let mut c = opts.cd.clone();
+        let mut cn = opts.cna.clone();
+        let mut k = opts.lift_k.clone();
+        let mut cp_ = opts.cp.clone();
+        let mut cgd = opts.cg_dry_m;
+        let mut cgp = opts.cg_prop_m;
+        let mut pi = opts.pitch_inertia;
+        if let Some(af) = &airframe {
+            if d.is_some() || c.is_some() {
+                return Err("error: --airframe conflicts with --diameter-m/--cd".to_string());
+            }
+            d = Some(af.diameter_m);
+            c = Some(af.cd_vs_mach.clone());
+            if cn.is_none() {
+                cn = Some(af.cna_vs_mach.clone());
+            }
+            if k.is_none() {
+                k = Some(af.induced_k_vs_mach.clone());
+            }
+            if cp_.is_none() {
+                cp_ = Some(af.cp_vs_mach.clone());
+            }
+            if cgd.is_none() {
+                cgd = Some(af.cg_dry_m);
+            }
+            if cgp.is_none() {
+                cgp = Some(af.cg_prop_m);
+            }
+            if pi.is_none() {
+                pi = Some(af.pitch_inertia_kg_m2);
+            }
+        }
+        (d, c, cn, k, cp_, cgd, cgp, pi)
+    };
+    #[cfg(feature = "ballistics")]
+    let use_drag = diameter_m.is_some() || cd.is_some();
     #[cfg(feature = "ballistics")]
     let wants_mpm = opts.twist_in.is_some()
         || opts.body_length_m.is_some()
         || opts.twist_left
         || opts.coriolis.is_some()
         || opts.tipoff.is_some()
-        || opts.cna.is_some()
-        || opts.lift_k.is_some()
+        || cna.is_some()
+        || lift_k.is_some()
         || opts.weathercock;
     #[cfg(feature = "ballistics")]
     if wants_mpm && !use_drag {
@@ -785,7 +887,7 @@ pub(crate) fn run_trajectory(
         GravityMode::Uniform => {
             #[cfg(feature = "ballistics")]
             if use_drag {
-                let (diameter, cd) = match (opts.diameter_m, &opts.cd) {
+                let (diameter, cd) = match (diameter_m, &cd) {
                     (Some(d), Some(c)) => (d, c.clone()),
                     _ => return Err("error: drag needs both --diameter-m and --cd".to_string()),
                 };
@@ -816,8 +918,8 @@ pub(crate) fn run_trajectory(
                 if let Some((yaw, decay)) = opts.tipoff {
                     forces = forces.with_tipoff_yaw(yaw, decay).map_err(fmt_err)?;
                 }
-                if opts.cna.is_some() || opts.lift_k.is_some() {
-                    let (cna, k) = match (opts.cna.clone(), opts.lift_k.clone()) {
+                if cna.is_some() || lift_k.is_some() {
+                    let (cna, k) = match (cna.clone(), lift_k.clone()) {
                         (Some(c), Some(k)) => (c, k),
                         _ => {
                             return Err("error: body lift needs both --cna and --lift-k".to_string())
@@ -871,6 +973,24 @@ pub(crate) fn run_trajectory(
         );
     }
 
+    #[cfg(feature = "ballistics")]
+    if let Some(cd_area) = opts.recover {
+        base = Forces::Recovered(
+            crate::RecoveryForces::new(
+                BoxedForces(Box::new(base)),
+                cd_area,
+                opts.recovery_after_s,
+                crate::ballistics::Atmosphere::default(),
+                opts.wind_mps,
+            )
+            .map_err(fmt_err)?,
+        );
+    }
+    #[cfg(not(feature = "ballistics"))]
+    if opts.recover.is_some() || opts.airframe.is_some() {
+        return Err("error: --recover and --airframe need the 'ballistics' feature".to_string());
+    }
+
     let mut guidance_base: Box<dyn Guidance> = if opts.prograde {
         Box::new(ProgradeDirection::new(axis)) as Box<dyn Guidance>
     } else {
@@ -878,19 +998,15 @@ pub(crate) fn run_trajectory(
     };
     #[cfg(feature = "ballistics")]
     if opts.weathercock {
-        let cna = opts.cna.clone().ok_or("error: --weathercock needs --cna")?;
-        let cp = opts.cp.clone().ok_or("error: --weathercock needs --cp")?;
+        let cna = cna.ok_or("error: --weathercock needs --cna")?;
+        let cp = cp.ok_or("error: --weathercock needs --cp")?;
         let params = crate::WeathercockParams::new(
             cna,
             cp,
-            opts.cg_dry_m
-                .ok_or("error: --weathercock needs --cg-dry-m")?,
-            opts.cg_prop_m
-                .ok_or("error: --weathercock needs --cg-prop-m")?,
-            opts.diameter_m
-                .ok_or("error: --weathercock needs --diameter-m")?,
-            opts.pitch_inertia
-                .ok_or("error: --weathercock needs --pitch-inertia")?,
+            cg_dry_m.ok_or("error: --weathercock needs --cg-dry-m")?,
+            cg_prop_m.ok_or("error: --weathercock needs --cg-prop-m")?,
+            diameter_m.ok_or("error: --weathercock needs --diameter-m")?,
+            pitch_inertia.ok_or("error: --weathercock needs --pitch-inertia")?,
             opts.damping_ratio,
         )
         .map_err(fmt_err)?;
@@ -1305,6 +1421,49 @@ mod tests {
         assert!(out.contains("burning"));
     }
 
+    #[test]
+    fn motor_eng_inline_rasp_flies() {
+        let out = run(&argv(
+            "simulate --motor-eng 'Estes D12 24 70 0 0.01 0.03\n0 0\n0.1 10\n1 0' \
+             --dry-mass 0.2 --duration-s 1.0 --dt-s 0.25",
+        ))
+        .unwrap();
+        assert!(out.contains("burning"), "got {out}");
+    }
+
+    #[test]
+    fn motor_eng_conflicts_with_explicit_curve() {
+        let err = run(&argv(
+            "simulate --motor-eng 'Estes D12 24 70 0 0.01 0.03\n0 0\n0.1 10\n1 0' \
+             --dry-mass 0.2 --curve 0:0,1:5 --propellant-mass 0.02",
+        ))
+        .unwrap_err();
+        assert!(err.contains("replaces"));
+    }
+
+    #[cfg(feature = "ballistics")]
+    #[test]
+    fn recovery_and_airframe_fly() {
+        let out = run(&argv(
+            "simulate --curve 0:0,0.5:200,1:0 --dry-mass 0.3 --propellant-mass 0.05 \
+             --duration-s 2.0 --dt-s 0.5 --recover 0.5",
+        ))
+        .unwrap();
+        assert!(out.contains("burnout"));
+        let out = run(&argv(
+            "simulate --curve 0:0,0.5:200,1:0 --dry-mass 0.3 --propellant-mass 0.05 \
+             --duration-s 1.0 --dt-s 0.05 --elevation-deg 80 --speed-mps 50 \
+             --airframe sport24 --weathercock",
+        ))
+        .unwrap();
+        assert!(out.contains("burning"), "got {out}");
+        let err = run(&argv(
+            "simulate --curve 0:0,0.5:200,1:0 --dry-mass 0.3 --propellant-mass 0.05 \
+             --airframe sport24 --diameter-m 0.05",
+        ))
+        .unwrap_err();
+        assert!(err.contains("conflicts"));
+    }
     #[cfg(feature = "ballistics")]
     #[test]
     fn weathercock_flies_and_needs_its_parameters() {

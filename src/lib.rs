@@ -30,6 +30,8 @@ mod dynamics;
 mod error;
 mod flight;
 mod guidance;
+#[cfg(feature = "model")]
+pub mod model_rocket;
 mod motor;
 #[cfg(feature = "wasm")]
 pub mod wasm;
@@ -45,6 +47,10 @@ pub use guidance::{
     BoxedGuidance, ControlInput, FixedDirection, Guidance, GuidanceContext, ProgradeDirection,
     SteeringLag, ThrustMisalignment,
 };
+#[cfg(feature = "model")]
+pub use model_rocket::MotorFile;
+#[cfg(all(feature = "model", feature = "ballistics"))]
+pub use model_rocket::{Airframe, RecoveryForces};
 pub use motor::{
     Motor, MotorPhase, MotorSample, Rocket, RocketSample, Stage, ThrustCurve, ThrustPoint,
 };

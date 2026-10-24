@@ -1,6 +1,6 @@
 [package]
 name = "rockets-engine"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.89"
 authors = ["Alex Jokela <email@tinycomputers.io>"]
@@ -19,11 +19,12 @@ exclude = ["site/"]
 crate-type = ["rlib", "cdylib"]
 
 [features]
-default = ["ballistics", "serde"]
+default = ["ballistics", "serde", "model"]
 ballistics = ["dep:ballistics-engine"]
 serde = ["dep:serde", "nalgebra/serde-serialize"]
-cli = []
-wasm = ["dep:wasm-bindgen"]
+cli = ["model"]
+wasm = ["dep:wasm-bindgen", "model"]
+model = []
 
 [dependencies]
 ballistics-engine = { version = "=0.48.0", default-features = false, optional = true }
