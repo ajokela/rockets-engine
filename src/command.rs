@@ -1537,6 +1537,7 @@ mod tests {
         assert!(out.contains("burning"), "got {out}");
     }
 
+    #[cfg(feature = "ballistics")]
     #[test]
     fn geometry_masses_estimate_cg_and_inertia() {
         // No --dry-mass/--cg-dry-m/--cg-prop-m/--pitch-inertia: the mass
