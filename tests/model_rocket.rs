@@ -24,6 +24,19 @@ fn parses_rasp_header_and_curve() {
 }
 
 #[test]
+fn flattened_single_line_rasp_still_parses() {
+    // Single-line inputs (e.g. browser fields) strip newlines; leftover header
+    // tokens must be treated as thrust samples, not silently dropped.
+    // (A leading ';' comment would swallow a flattened line, so use a
+    // comment-free file, matching the terminal's example button.)
+    let flat = "Estes D12 24 70 0 0.01 0.03 0 0 0.1 10 1 0";
+    let file = MotorFile::parse(flat).unwrap();
+    assert_eq!(file.curve.points().len(), 3);
+    assert_eq!(file.propellant_mass_kg, 0.01);
+    assert_eq!(file.motor(0.0).unwrap().burnout_time_s(), 1.0);
+}
+
+#[test]
 fn parser_rejects_bad_input() {
     assert!(MotorFile::parse("").is_err());
     assert!(MotorFile::parse("Estes D12 24 70 0\n").is_err());

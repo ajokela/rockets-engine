@@ -65,22 +65,25 @@ impl MotorFile {
         };
         let diameter_mm = number(tokens[2], "diameter_mm")?;
         let length_mm = number(tokens[3], "length_mm")?;
+        // The header may share its line with thrust samples (e.g. when a paste
+        // flattens newlines). Treat every token after the header as a flat
+        // stream of time/thrust pairs, independent of original line breaks.
+        let header_len = if tokens.len() >= 7 { 7 } else { 6 };
+        let mut stream = tokens[header_len..]
+            .iter()
+            .copied()
+            .chain(lines.flat_map(|line| line.split_whitespace()));
         let mut points = Vec::new();
-        for line in lines {
-            let mut parts = line.split_whitespace();
-            let time_s: f64 = parts
+        while let Some(time_tok) = stream.next() {
+            let thrust_tok = stream
                 .next()
-                .ok_or_else(|| Error::invalid("motor file", "empty data row"))?
+                .ok_or_else(|| Error::invalid("motor file", "row needs time and thrust"))?;
+            let time_s: f64 = time_tok
                 .parse()
                 .map_err(|_| Error::invalid("motor file", "non-numeric time"))?;
-            let thrust_n: f64 = parts
-                .next()
-                .ok_or_else(|| Error::invalid("motor file", "row needs time and thrust"))?
+            let thrust_n: f64 = thrust_tok
                 .parse()
                 .map_err(|_| Error::invalid("motor file", "non-numeric thrust"))?;
-            if parts.next().is_some() {
-                return Err(Error::invalid("motor file", "data row has extra columns"));
-            }
             points.push(ThrustPoint { time_s, thrust_n });
         }
         if points.len() < 2 {

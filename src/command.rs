@@ -574,7 +574,10 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
         (Some(_), Some(_)) => {
             return Err("error: use only one of --motor-eng and --motor-file".to_string())
         }
-        (Some(text), None) => Some(crate::model_rocket::MotorFile::parse(&text).map_err(fmt_err)?),
+        (Some(text), None) => {
+            let text = text.replace("\\n", "\n");
+            Some(crate::model_rocket::MotorFile::parse(&text).map_err(fmt_err)?)
+        }
         (None, Some(path)) => Some(load_motor_file(&path)?),
         (None, None) => None,
     };
@@ -1462,6 +1465,16 @@ mod tests {
     fn motor_eng_inline_rasp_flies() {
         let out = run(&argv(
             "simulate --motor-eng 'Estes D12 24 70 0 0.01 0.03\n0 0\n0.1 10\n1 0' \
+             --dry-mass 0.2 --duration-s 1.0 --dt-s 0.25",
+        ))
+        .unwrap();
+        assert!(out.contains("burning"), "got {out}");
+    }
+
+    #[test]
+    fn motor_eng_escaped_newlines_parse() {
+        let out = run(&argv(
+            "simulate --motor-eng 'Estes D12 24 70 0 0.01 0.03\\n0 0\\n0.1 10\\n1 0' \
              --dry-mass 0.2 --duration-s 1.0 --dt-s 0.25",
         ))
         .unwrap();

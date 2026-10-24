@@ -112,7 +112,7 @@
 <body>
 <main>
   <header>
-    <h1>rockets-engine <span class="ver">v0.8.0</span></h1>
+    <h1>rockets-engine <span class="ver">v0.8.1</span></h1>
     <p class="tagline">Point-mass powered flight for Rust — prescribed motor burns, staging and guidance hooks on the ballistics-engine force kernel.</p>
     <svg class="rocket-arc" viewBox="0 0 780 170" aria-hidden="true">
       <path id="flight" class="trail" d="M -50 160 Q 390 -80 830 160" fill="none" stroke-width="1.5"/>
@@ -190,15 +190,12 @@
   <h2>Model a rocket from geometry</h2>
   <p>Describe the airframe instead of guessing curves. The Barrowman modeler turns nose, tube and fin geometry into Cd/Cnα/CP, the weathercock uses CP/CG for stability, and the recovery model brings it home. One command exercises the whole stack:</p>
   <pre class="code"><code><span class="k">simulate</span> \
-  <span class="m">--motor-eng</span> <span class="s">'Estes D12 24 70 0 0.01 0.03
-0 0
-0.1 10
-1 0'</span> \
+  <span class="m">--motor-eng</span> <span class="s">'Estes D12 24 70 0 0.01 0.03\n0 0\n0.1 10\n1 0'</span> \
   <span class="m">--geometry</span> <span class="s">nose=conical:0.1:0.024,tube=0.4:0.024,fins=3:0.05:0.03:0.04:0.02:0.002</span> \
   <span class="m">--dry-mass</span> <span class="n">0.2</span> \
   <span class="m">--weathercock</span> <span class="m">--cg-dry-m</span> <span class="n">0.12</span> <span class="m">--cg-prop-m</span> <span class="n">0.16</span> <span class="m">--pitch-inertia</span> <span class="n">0.004</span> \
   <span class="m">--recover</span> <span class="n">0.25</span> <span class="m">--plot</span></code></pre>
-  <p class="code-note">The <code>--motor-eng</code> text is a RASP .eng motor file (paste your own). <code>--geometry</code> is <code>nose=shape:length:diameter,tube=length:diameter,fins=count:root:tip:span:sweep:thickness</code>, in metres. <code>--weathercock</code> takes the CG references and pitch inertia; <code>--recover</code> is the parachute's Cd·A in m². Try it in <a href="/sh/">the browser terminal</a> — the examples row covers every feature in the engine, from staging and gravity turns to Monte-Carlo dispersion and elevation solving.</p>
+  <p class="code-note">The <code>--motor-eng</code> text is a RASP .eng motor file (paste your own); <code>\n</code> escapes mark its line breaks so the command works in single-line terminals. <code>--geometry</code> is <code>nose=shape:length:diameter,tube=length:diameter,fins=count:root:tip:span:sweep:thickness</code>, in metres. <code>--weathercock</code> takes the CG references and pitch inertia; <code>--recover</code> is the parachute's Cd·A in m². Try it in <a href="/sh/">the browser terminal</a> — the examples row covers every feature in the engine, from staging and gravity turns to Monte-Carlo dispersion and elevation solving.</p>
 
   <h2>Get it</h2>
   <div class="links">
