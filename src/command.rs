@@ -79,7 +79,8 @@ fn help() -> String {
      \x20 --recover <cdA>         drogue Cd·A in m²; recovery drag on descent\n\
      \x20 --recovery-after-s <t>  absolute-time gate for deployment [0=apogee]\n\
      \x20 --recover-main <cdA>    main parachute Cd·A (dual deployment)\n\
-     \x20 --main-altitude-m <m>   swap to the main below this altitude [300]\n\
+     \x20 --main-altitude-m <m>   swap to the main below this altitude\n\
+     \x20                            above sea level [300]\n\
      \x20 --airframe <preset>     sport24 or hp54: diameter, Cd, Cnα, CP, CG,\n\
      \x20                            inertia and recovery Cd·A, illustrative only\n\
      \x20 --geometry <spec>       Barrowman modeler (subsonic + supersonic):\n\
@@ -95,7 +96,9 @@ fn help() -> String {
      \x20 --elevation-deg <deg>    launch elevation above horizontal [90]\n\
      \x20 --azimuth-deg <deg>      launch azimuth from +X toward +Z [0]\n\
      \x20 --speed-mps <v>          initial speed along the launch axis [0]\n\
-     \x20 --position-m <x,y,z>     initial position [0,0,0]\n\
+     \x20 --position-m <x,y,z>     initial position; y is altitude above\n\
+     \x20                            sea level, and the ground is sea level\n\
+     \x20                            (impact at y = 0) [0,0,0]\n\
      \x20 --prograde              thrust follows velocity (gravity turn)\n\
      \x20 --weathercock           second-order body-axis dynamics toward the\n\
      \x20                            relative wind (needs --cna, --cp, --cg-dry-m,\n\
@@ -894,7 +897,8 @@ fn fmt_err(e: Error) -> String {
 
 /// Assemble the rocket, environment and guidance chain, then integrate.
 /// Returns the sampled rows and the internal RK4 substep count.
-/// `stop_at_impact` ends the run at the first ground crossing (y reaching 0).
+/// `stop_at_impact` ends the run at the first ground crossing (y reaching 0): Y is altitude
+/// above sea level, and the CLI's ground is sea level.
 pub(crate) fn run_trajectory(
     opts: &Options,
     stop_at_impact: bool,
