@@ -1,12 +1,15 @@
-//! Geometry-to-aerodynamics: a subsonic Barrowman subset for slender model
-//! rockets (nose cone + body tube + trapezoidal fins), implemented against the
-//! OpenRocket technical documentation and its `FinSetCalc`/`BarrowmanCalculator`
-//! sources. CP comes from the component moment sum; drag is friction + base +
-//! conical nose pressure. Supersonic values are clamped to the Mach-1 results.
+//! Geometry-to-aerodynamics: a Barrowman subset for slender model rockets
+//! (nose cone + body tube + trapezoidal fins), implemented against the
+//! OpenRocket technical documentation and its `FinSetCalc` and
+//! `SymmetricComponentCalc` sources. CP comes from the component moment sum
+//! (with the supersonic aft shift); drag is friction + base + nose wave drag
+//! + rounded-fin form drag. The fin normal-force slope uses Diederich below Mach 1, the Busemann K1 term above Mach 1.5, and OpenRocket's Hermite join between them.
 //!
 //! Induced drag from angle of attack uses the normal-force tilt model
-//! (Cd += Cnα·α²). Not covered (deliberately): supersonic wave drag,
-//! boat-tails/transitions, and elliptical or free-form fins.
+//! (Cd += Cnα·α²). Not covered (deliberately): boat-tails/transitions,
+//! elliptical or free-form fins, fin-body interference drag, and wave drag
+//! of elliptical/parabolic noses past Mach 1 (conical and ogive are fully
+//! modelled).
 
 use crate::{Error, Result};
 
@@ -49,20 +52,6 @@ impl NoseShape {
             Self::Ogive => 0.466,
             Self::Elliptical => 1.0 / 3.0,
             Self::Parabolic => 0.5,
-        }
-    }
-
-    /// Pressure-drag coefficient at subsonic speeds. Conical noses use
-    /// 0.8·sin²(φ) with the half-angle φ = atan(r/L); streamlined shapes are
-    /// taken as zero, the usual Barrowman approximation.
-    fn pressure_cd(self, length_m: f64, diameter_m: f64) -> f64 {
-        match self {
-            Self::Conical => {
-                let r = diameter_m / 2.0;
-                let sin_phi = r / (r * r + length_m * length_m).sqrt();
-                0.8 * sin_phi * sin_phi
-            }
-            _ => 0.0,
         }
     }
 
@@ -170,8 +159,28 @@ impl RocketGeometry {
         (2.0 / 3.0) * (cr + ct - cr * ct / (cr + ct))
     }
 
-    /// Fin CP measured from the fin's root leading edge: xMAC_LE + MAC/4.
-    fn fin_cp(&self) -> f64 {
+    /// Fin CP as a fraction of the MAC: quarter-chord at M ≤ 0.5, the
+    /// empirical supersonic formula at M ≥ 2, a linear join between
+    /// (OpenRocket's FinSetCalc.calculateCPPos; it fits a polynomial, but
+    /// the join error is small beside the component moment sum).
+    fn fin_cp_fraction(&self, mach: f64) -> f64 {
+        if mach <= 0.5 {
+            return 0.25;
+        }
+        let ar = 2.0 * self.fins.span_m.powi(2) / self.fin_area();
+        let supersonic = |m: f64| {
+            let beta = (m * m - 1.0).sqrt();
+            (ar * beta - 0.67) / (2.0 * ar * beta - 1.0)
+        };
+        if mach >= 2.0 {
+            return supersonic(mach);
+        }
+        let hi = supersonic(2.0);
+        0.25 + (hi - 0.25) * (mach - 0.5) / 1.5
+    }
+
+    /// Fin CP measured from the fin's root leading edge.
+    fn fin_cp(&self, mach: f64) -> f64 {
         let (cr, ct, s, m) = (
             self.fins.root_chord_m,
             self.fins.tip_chord_m,
@@ -180,7 +189,72 @@ impl RocketGeometry {
         );
         let y_mac = (s / 3.0) * (cr + 2.0 * ct) / (cr + ct);
         let x_mac_le = m * y_mac / s;
-        x_mac_le + 0.25 * self.mac()
+        x_mac_le + self.fin_cp_fraction(mach) * self.mac()
+    }
+
+    /// Cosine of the leading-edge sweep angle.
+    fn leading_edge_cos(&self) -> f64 {
+        let (s, m) = (self.fins.span_m, self.fins.leading_sweep_m);
+        s / (s * s + m * m).sqrt()
+    }
+
+    /// Fin pressure (form) drag: OpenRocket's rounded-section model —
+    /// a Mach-dependent leading-edge term times cos²(Γ_LE), plus half the
+    /// base drag for the trailing edge, scaled by span·thickness / A_ref.
+    fn fin_pressure_cd(&self, mach: f64) -> f64 {
+        let span = self.fins.span_m;
+        let thickness = self.fins.thickness_m;
+        if span <= 0.0 || thickness <= 0.0 {
+            return 0.0;
+        }
+        let leading_edge = if mach < 0.9 {
+            (1.0 - mach * mach).powf(-0.417) - 1.0
+        } else if mach < 1.0 {
+            1.0 - 1.785 * (mach - 0.9)
+        } else {
+            let m2 = mach * mach;
+            1.214 - 0.502 / (m2 * m2) + 0.1095 / (m2 * m2 * m2 * m2)
+        };
+        let cos_le = self.leading_edge_cos();
+        let cd = leading_edge * cos_le * cos_le + Self::base_cd(mach) / 2.0;
+        cd * span * thickness / self.ref_area_m2()
+    }
+
+    /// Nose pressure drag per frontal area for conical and tangent-ogive
+    /// noses: OpenRocket's direct calculation (polynomial through M 1–1.3,
+    /// 2.1·sin²φ + 0.5·sinφ/β above, a·M^b + 0.8·sin²φ fitted subsonic).
+    /// Elliptical and parabolic noses are not modelled past Mach 1 yet and
+    /// return 0 there (their subsonic value is 0 in this subset).
+    fn nose_pressure_cd(&self, mach: f64) -> f64 {
+        let sinphi = match self.nose.shape {
+            NoseShape::Conical | NoseShape::Ogive => {
+                let r = self.nose.diameter_m / 2.0;
+                r / (r * r + self.nose.length_m * self.nose.length_m).sqrt()
+            }
+            _ => return 0.0,
+        };
+        const GAMMA: f64 = 1.4;
+        let cd_mach0 = 0.8 * sinphi * sinphi;
+        let y1 = 2.1 * sinphi * sinphi + 0.6019 * sinphi;
+        let d0 = 4.0 / (GAMMA + 1.0) * (1.0 - 0.5 * sinphi);
+        let d1 = -1.1341 * sinphi;
+        if mach >= 1.3 {
+            return 2.1 * sinphi * sinphi + 0.5 * sinphi / (mach * mach - 1.0).sqrt();
+        }
+        if mach >= 1.0 {
+            return Self::hermite(mach, 1.0, 1.3, sinphi, y1, d0, d1);
+        }
+        // Subsonic: Cd = a·M^b + Cd(0), fitted to reach (1, sinphi) with the
+        // polynomial's derivative (OpenRocket's interpolation scheme).
+        let eps = 0.01;
+        let at_eps = Self::hermite(1.0 + eps, 1.0, 1.3, sinphi, y1, d0, d1);
+        let min_deriv = (at_eps - sinphi) / eps;
+        let gap = sinphi - cd_mach0;
+        if gap <= 0.01 || min_deriv <= 0.01 {
+            return cd_mach0;
+        }
+        let b = min_deriv / gap;
+        gap * mach.powf(b) + cd_mach0
     }
 
     fn midchord_cos(&self) -> f64 {
@@ -194,8 +268,28 @@ impl RocketGeometry {
         gamma.cos()
     }
 
+    /// Cubic Hermite interpolation on [x0, x1] with endpoint values y0, y1
+    /// and endpoint derivatives d0, d1 per unit x.
+    fn hermite(x: f64, x0: f64, x1: f64, y0: f64, y1: f64, d0: f64, d1: f64) -> f64 {
+        let h = x1 - x0;
+        let t = (x - x0) / h;
+        let t2 = t * t;
+        let t3 = t2 * t;
+        (2.0 * t3 - 3.0 * t2 + 1.0) * y0
+            + (t3 - 2.0 * t2 + t) * h * d0
+            + (-2.0 * t3 + 3.0 * t2) * y1
+            + (t3 - t2) * h * d1
+    }
+
+    /// Mach bounds of OpenRocket's transonic interpolation.
+    const CNA_SUBSONIC: f64 = 0.9;
+    const CNA_SUPERSONIC: f64 = 1.5;
+
     /// Normal-force slope of one fin, divided by the reference area.
-    /// OpenRocket's subsonic Diederich simplification.
+    /// Subsonic: OpenRocket's Diederich simplification. Supersonic:
+    /// 2·A_fin/(β·A_ref) (the K1 term of the Busemann expansion; the α
+    /// terms vanish for a slope table). Transonic: OpenRocket's cubic
+    /// Hermite join with matched endpoint derivatives.
     fn fin_cna1(&self, mach: f64) -> f64 {
         let span = self.fins.span_m;
         let area = self.fin_area();
@@ -203,10 +297,39 @@ impl RocketGeometry {
         if area <= 0.0 || span <= 0.0 || cos <= 0.0 {
             return 0.0;
         }
-        let ratio = (span * span) / (area * cos);
-        2.0 * std::f64::consts::PI * span * span
-            / (1.0 + (1.0 + (1.0 - mach * mach) * ratio * ratio).sqrt())
-            / self.ref_area_m2()
+        let ref_area = self.ref_area_m2();
+        let subsonic = |m: f64| {
+            let ratio = (span * span) / (area * cos);
+            2.0 * std::f64::consts::PI * span * span
+                / (1.0 + (1.0 + (1.0 - m * m) * ratio * ratio).sqrt())
+                / ref_area
+        };
+        let supersonic = |m: f64| 2.0 * area / (m * m - 1.0).sqrt() / ref_area;
+        if mach <= Self::CNA_SUBSONIC {
+            return subsonic(mach);
+        }
+        if mach >= Self::CNA_SUPERSONIC {
+            return supersonic(mach);
+        }
+        let sq = (1.0
+            + (1.0 - Self::CNA_SUBSONIC * Self::CNA_SUBSONIC)
+                * (span * span / (area * cos)).powi(2))
+        .sqrt();
+        let sub_v = 2.0 * std::f64::consts::PI * span * span / ref_area / (1.0 + sq);
+        let sub_d = 2.0 * Self::CNA_SUBSONIC * std::f64::consts::PI * span.powi(6)
+            / ((area * cos).powi(2) * ref_area * sq * (1.0 + sq).powi(2));
+        let super_v = supersonic(Self::CNA_SUPERSONIC);
+        let beta_b = (Self::CNA_SUPERSONIC * Self::CNA_SUPERSONIC - 1.0).powf(1.5);
+        let super_d = -area / ref_area * 2.0 * Self::CNA_SUPERSONIC / beta_b;
+        Self::hermite(
+            mach,
+            Self::CNA_SUBSONIC,
+            Self::CNA_SUPERSONIC,
+            sub_v,
+            super_v,
+            sub_d,
+            super_d,
+        )
     }
 
     /// Body-interference factor (1 + tau) with tau = r/(span + r).
@@ -241,8 +364,8 @@ impl RocketGeometry {
     }
 
     /// Fin CP measured from the nose tip (fin trailing edge at body end).
-    fn fin_cp_abs(&self) -> f64 {
-        self.total_length_m() - self.fins.root_chord_m + self.fin_cp()
+    fn fin_cp_abs(&self, mach: f64) -> f64 {
+        self.total_length_m() - self.fins.root_chord_m + self.fin_cp(mach)
     }
 
     /// Nose radius profile r(x) with x measured from the tip.
@@ -355,7 +478,7 @@ impl RocketGeometry {
         let nose_cna = 2.0;
         let fin_cna = self.fin_set_cna(mach);
         (nose_cna * self.nose.length_m * self.nose.shape.cp_fraction()
-            + fin_cna * self.fin_cp_abs())
+            + fin_cna * self.fin_cp_abs(mach))
             / (nose_cna + fin_cna)
     }
 
@@ -399,29 +522,27 @@ impl RocketGeometry {
         cf * (correction * body_wet + thickness_factor * fin_wet) / self.ref_area_m2()
     }
 
-    /// Full analysis. Mach samples at 0.0, 0.2, 0.4, 0.6, 0.8, 1.0, and 3.0;
-    /// the last point simply repeats the Mach-1 values (subsonic clamp).
+    /// Full analysis. Mach samples at 0.0, 0.2, 0.4, 0.6, 0.8, 0.9, 1.0,
+    /// 1.1, 1.3, 1.5, 2.0 and 3.0, computed across the transonic and
+    /// supersonic regimes (no clamp).
     pub fn analyze(&self) -> AeroAnalysis {
         self.validate();
-        let machs: [f64; 7] = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 3.0];
+        let machs: [f64; 12] = [0.0, 0.2, 0.4, 0.6, 0.8, 0.9, 1.0, 1.1, 1.3, 1.5, 2.0, 3.0];
         let mut cd_vs_mach = Vec::new();
         let mut cna_vs_mach = Vec::new();
         let mut cp_vs_mach = Vec::new();
         let mut induced_k_vs_mach = Vec::new();
         for &m in &machs {
-            let effective = m.min(1.0);
             cd_vs_mach.push((
                 m,
-                Self::base_cd(effective)
-                    + self
-                        .nose
-                        .shape
-                        .pressure_cd(self.nose.length_m, self.nose.diameter_m)
-                    + self.friction_cd(effective, 340.0),
+                Self::base_cd(m)
+                    + self.nose_pressure_cd(m)
+                    + self.fin_pressure_cd(m)
+                    + self.friction_cd(m, 340.0),
             ));
-            let fin_cna = self.fin_set_cna(effective);
+            let fin_cna = self.fin_set_cna(m);
             cna_vs_mach.push((m, 2.0 + fin_cna));
-            cp_vs_mach.push((m, self.total_cp(effective)));
+            cp_vs_mach.push((m, self.total_cp(m)));
             // Induced drag from the normal force's tilt onto the flight
             // path: Cd_induced = Cnα·α², so k = Cnα (OpenRocket's model).
             induced_k_vs_mach.push((m, 2.0 + fin_cna));
@@ -644,10 +765,30 @@ mod tests {
 
     #[test]
     fn conical_pressure_drag_uses_half_angle() {
-        let cd = NoseShape::Conical.pressure_cd(0.1, 0.024);
+        // The M->0 limit of the wave-drag model is Barrowman's 0.8·sin²(φ).
+        let geo = example(); // conical nose, L = 0.1, R = 0.012
         let sin_phi = 0.012 / (0.012_f64.powi(2) + 0.1_f64.powi(2)).sqrt();
-        assert!((cd - 0.8 * sin_phi * sin_phi).abs() < 1e-12);
-        assert_eq!(NoseShape::Ogive.pressure_cd(0.1, 0.024), 0.0);
+        assert!((geo.nose_pressure_cd(0.0) - 0.8 * sin_phi * sin_phi).abs() < 1e-12);
+    }
+
+    #[test]
+    fn nose_wave_drag_matches_openrocket_formula() {
+        let geo = example(); // conical, L = 0.1, R = 0.012
+        let r = 0.012_f64;
+        let sinphi = r / (r * r + 0.1 * 0.1).sqrt();
+        // Supersonic direct formula: 2.1·sin²φ + 0.5·sinφ/β.
+        let m = 1.5_f64;
+        let expected = 2.1 * sinphi * sinphi + 0.5 * sinphi / (m * m - 1.0).sqrt();
+        assert!(
+            (geo.nose_pressure_cd(m) - expected).abs() < 1e-12,
+            "{} vs {expected}",
+            geo.nose_pressure_cd(m)
+        );
+        // Monotone rise through the transonic region, continuous at M = 1.
+        let below = geo.nose_pressure_cd(0.999);
+        let at = geo.nose_pressure_cd(1.0);
+        assert!((at - sinphi).abs() < 0.02, "at {at}");
+        assert!(below < at && below > 0.8 * sinphi * sinphi);
     }
 
     #[test]
@@ -657,7 +798,24 @@ mod tests {
         let mac = (2.0 / 3.0) * (0.05 + 0.03 - 0.05 * 0.03 / 0.08);
         let y_mac = (0.04 / 3.0) * (0.05 + 2.0 * 0.03) / 0.08;
         let expected = 0.02 * y_mac / 0.04 + 0.25 * mac;
-        assert!((geo.fin_cp() - expected).abs() < 1e-12, "{}", geo.fin_cp());
+        assert!(
+            (geo.fin_cp(0.0) - expected).abs() < 1e-12,
+            "{}",
+            geo.fin_cp(0.0)
+        );
+    }
+
+    #[test]
+    fn fin_cp_moves_aft_supersonic() {
+        let geo = example();
+        assert_eq!(geo.fin_cp_fraction(0.0), 0.25);
+        assert_eq!(geo.fin_cp_fraction(0.5), 0.25);
+        // Supersonic empirical formula: (AR·β − 0.67)/(2·AR·β − 1).
+        let ar = 2.0 * 0.04_f64.powi(2) / geo.fin_area();
+        let beta = (4.0_f64 - 1.0).sqrt();
+        let expected = (ar * beta - 0.67) / (2.0 * ar * beta - 1.0);
+        assert!((geo.fin_cp_fraction(2.0) - expected).abs() < 1e-12);
+        assert!(geo.fin_cp_fraction(1.0) > 0.25 && geo.fin_cp_fraction(1.0) < expected);
     }
 
     #[test]
@@ -788,7 +946,7 @@ mod tests {
     fn total_cp_is_the_moment_sum() {
         let geo = example();
         let fin_cna = geo.fin_set_cna(0.0);
-        let expected = (2.0 * geo.nose_cp() + fin_cna * geo.fin_cp_abs()) / (2.0 + fin_cna);
+        let expected = (2.0 * geo.nose_cp() + fin_cna * geo.fin_cp_abs(0.0)) / (2.0 + fin_cna);
         assert!((geo.total_cp(0.0) - expected).abs() < 1e-12);
         // CP must sit aft of the nose CP (fins pull it back).
         assert!(geo.total_cp(0.0) > geo.nose_cp());

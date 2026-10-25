@@ -82,7 +82,7 @@ fn help() -> String {
      \x20 --main-altitude-m <m>   swap to the main below this altitude [300]\n\
      \x20 --airframe <preset>     sport24 or hp54: diameter, Cd, Cnα, CP, CG,\n\
      \x20                            inertia and recovery Cd·A, illustrative only\n\
-     \x20 --geometry <spec>       subsonic Barrowman modeler:\n\
+     \x20 --geometry <spec>       Barrowman modeler (subsonic + supersonic):\n\
      \x20                            nose=shape:L:D,tube=L:D,fins=N:cr:ct:s:m:t\n\
      \x20                            (m = leading-edge sweep; t = thickness, m)\n\
      \x20 --geometry-masses <n,t,f> structural masses (kg) for --geometry;\n\
@@ -1669,6 +1669,33 @@ mod tests {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(409.63);
+        assert!(
+            (apogee - reference).abs() / reference < 0.10,
+            "apogee {apogee} vs OpenRocket {reference}"
+        );
+    }
+
+    #[cfg(feature = "ballistics")]
+    #[test]
+    fn openrocket_flight_parity_alpha_iii_d21() {
+        // Same fixture on the D21 triangle motor, reaching Mach 0.85: pins
+        // the transonic pressure rise (fin form drag and nose wave drag).
+        let out = run(&argv(
+            "simulate --motor-eng 'AeroTech D21 18 70 0 0.0096 0.025\\n0 0\\n1 32\\n2 0' \
+             --geometry nose=ogive:0.07:0.024,tube=0.2:0.024,fins=3:0.05:0.03:0.05:0.02:0.0032 \
+             --geometry-masses 0.00427,0.00794,0.01306 --duration-s 20 --dt-s 0.05",
+        ))
+        .unwrap();
+        let apogee: f64 = out
+            .split_whitespace()
+            .skip_while(|t| *t != "apogee")
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .expect("apogee line");
+        let reference: f64 = std::env::var("ROCKETS_OPENROCKET_D21_APOGEE_M")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(697.02);
         assert!(
             (apogee - reference).abs() / reference < 0.10,
             "apogee {apogee} vs OpenRocket {reference}"

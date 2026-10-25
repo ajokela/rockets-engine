@@ -6,71 +6,53 @@ import com.google.inject.util.Modules;
 import info.openrocket.core.document.Simulation;
 import info.openrocket.core.l10n.DebugTranslator;
 import info.openrocket.core.l10n.Translator;
-import info.openrocket.core.plugin.PluginModule;
-import info.openrocket.core.startup.Application;
-import info.openrocket.core.startup.CoreModule;
 import info.openrocket.core.models.wind.PinkNoiseWindModel;
 import info.openrocket.core.motor.Manufacturer;
 import info.openrocket.core.motor.Motor;
 import info.openrocket.core.motor.MotorConfiguration;
 import info.openrocket.core.motor.ThrustCurveMotor;
+import info.openrocket.core.plugin.PluginModule;
 import info.openrocket.core.rocketcomponent.FlightConfiguration;
 import info.openrocket.core.rocketcomponent.InnerTube;
 import info.openrocket.core.rocketcomponent.Rocket;
 import info.openrocket.core.rocketcomponent.RocketComponent;
 import info.openrocket.core.simulation.FlightData;
 import info.openrocket.core.simulation.SimulationOptions;
+import info.openrocket.core.startup.Application;
+import info.openrocket.core.startup.CoreModule;
 import info.openrocket.core.util.Coordinate;
 import info.openrocket.core.util.TestRockets;
 
 /**
- * Flies OpenRocket's own Estes Alpha III fixture on its D21 test motor with
- * zero wind and prints the apogee plus the component masses, so the Rust
- * flight-parity test can pin both. See README.md in this directory.
+ * Flies OpenRocket's own Estes Alpha III fixture on its A8 and D21 test
+ * motors with zero wind and prints both apogees plus the component masses,
+ * so the Rust flight-parity tests can pin them. See README.md in this
+ * directory.
  */
 public class Apogee {
-    public static void main(String[] args) throws Exception {
-        // Bootstrap the same way the unit tests do, minus JUnit.
-        Module debugTranslator = new AbstractModule() {
-            @Override
-            protected void configure() {
-                bind(Translator.class).toInstance(new DebugTranslator(null));
-            }
-        };
-        Injector injector = Guice.createInjector(
-                Modules.override(new CoreModule()).with(debugTranslator), new PluginModule());
-        Application.setInjector(injector);
 
-        Rocket rocket = TestRockets.makeEstesAlphaIII();
-        FlightConfiguration config = rocket.getSelectedConfiguration();
-
-        // The fixture's A8: 9 N-s triangle, 18 mm x 70 mm, 3.3 g propellant.
-        // Kept deliberately slow (Mach < 0.3) so the comparison stays in the
-        // subsonic regime our Barrowman modeler covers; the D21 reaches
-        // Mach 0.8, where OpenRocket's pre-transonic rise (which we clamp)
-        // dominates the difference.
-        Motor a8 = new ThrustCurveMotor.Builder()
-                .setManufacturer(Manufacturer.getManufacturer("Estes"))
-                .setDesignation("A8")
-                .setDescription("SU Black Powder").setCaseInfo("SU 18.0x70.0")
+    private static Motor motor(String designation, double thrustPeak, double m0, double m1, double m2) {
+        return new ThrustCurveMotor.Builder()
+                .setManufacturer(Manufacturer.getManufacturer("Test"))
+                .setDesignation(designation)
+                .setDescription("").setCaseInfo("SU 18.0x70.0")
                 .setMotorType(Motor.Type.SINGLE)
                 .setStandardDelays(new double[] {})
                 .setDiameter(0.018).setLength(0.070)
                 .setTimePoints(new double[] { 0, 1, 2 })
-                .setThrustPoints(new double[] { 0, 9, 0 })
+                .setThrustPoints(new double[] { 0, thrustPeak, 0 })
                 .setCGPoints(new Coordinate[] {
-                        new Coordinate(0.035, 0, 0, 0.0164),
-                        new Coordinate(0.035, 0, 0, 0.0145),
-                        new Coordinate(0.035, 0, 0, 0.0131) })
-                .setDigest("digest A8 test")
+                        new Coordinate(0.035, 0, 0, m0),
+                        new Coordinate(0.035, 0, 0, m1),
+                        new Coordinate(0.035, 0, 0, m2) })
+                .setDigest("test")
                 .build();
+    }
 
-        InnerTube inner = null;
+    private static Rocket preparedRocket() {
+        Rocket rocket = TestRockets.makeEstesAlphaIII();
         java.util.List<RocketComponent> toRemove = new java.util.ArrayList<>();
         for (RocketComponent c : rocket) {
-            if (c instanceof InnerTube) {
-                inner = (InnerTube) c;
-            }
             if (c instanceof info.openrocket.core.rocketcomponent.TrapezoidFinSet) {
                 // Our Barrowman modeler assumes streamlined fins; OpenRocket's
                 // default SQUARE section adds ~(t/MAC)·A_fins/A_ref ≈ 1.0 of
@@ -93,18 +75,20 @@ public class Apogee {
         for (RocketComponent c : toRemove) {
             c.getParent().removeChild(c);
         }
-        MotorConfiguration mc = new MotorConfiguration(inner, TestRockets.TEST_FCID_0);
-        mc.setMotor(a8);
-        mc.setEjectionDelay(1000.0); // chute never fires: apogee-only comparison
-        inner.setMotorConfig(mc, TestRockets.TEST_FCID_0);
+        return rocket;
+    }
 
+    private static double fly(Rocket rocket, Motor motor) throws Exception {
+        InnerTube inner = null;
         for (RocketComponent c : rocket) {
-            double m = c.getComponentMass();
-            if (m > 0.0) {
-                System.out.printf("MASS %-24s %8.5f cg=%.4f%n",
-                        c.getComponentName(), m, c.getComponentCG().x);
+            if (c instanceof InnerTube) {
+                inner = (InnerTube) c;
             }
         }
+        MotorConfiguration mc = new MotorConfiguration(inner, TestRockets.TEST_FCID_0);
+        mc.setMotor(motor);
+        mc.setEjectionDelay(1000.0); // chute never fires: apogee-only comparison
+        inner.setMotorConfig(mc, TestRockets.TEST_FCID_0);
 
         Simulation sim = new Simulation(rocket);
         sim.setFlightConfigurationId(TestRockets.TEST_FCID_0);
@@ -116,24 +100,38 @@ public class Apogee {
         wind.setStandardDeviation(0.0);
         sim.simulate();
         FlightData data = sim.getSimulatedData();
-        System.out.printf("APOGEE %.4f%n", data.getMaxAltitude());
-        System.out.printf("MAXV %.4f%n", data.getMaxVelocity());
+        return data.getMaxAltitude();
+    }
 
-        info.openrocket.core.simulation.FlightDataBranch b = data.getBranch(0);
-        java.util.List<Double> ts = b.get(info.openrocket.core.simulation.FlightDataType.TYPE_TIME);
-        java.util.List<Double> alts = b.get(info.openrocket.core.simulation.FlightDataType.TYPE_ALTITUDE);
-        java.util.List<Double> vels = b.get(info.openrocket.core.simulation.FlightDataType.TYPE_VELOCITY_TOTAL);
-        java.util.List<Double> cds = b.get(info.openrocket.core.simulation.FlightDataType.TYPE_DRAG_COEFF);
-        java.util.List<Double> fric = b.get(info.openrocket.core.simulation.FlightDataType.TYPE_FRICTION_DRAG_COEFF);
-        java.util.List<Double> pres = b.get(info.openrocket.core.simulation.FlightDataType.TYPE_PRESSURE_DRAG_COEFF);
-        java.util.List<Double> base = b.get(info.openrocket.core.simulation.FlightDataType.TYPE_BASE_DRAG_COEFF);
-        java.util.List<Double> masses = b.get(info.openrocket.core.simulation.FlightDataType.TYPE_MASS);
-        for (int i = 0; i < ts.size(); i++) {
-            if (ts.get(i) <= 3.0 || i % 40 == 0) {
-                System.out.printf("ROW t=%.2f alt=%.2f v=%.2f cd=%.4f fric=%.4f pres=%.4f base=%.4f m=%.5f%n",
-                        ts.get(i), alts.get(i), vels.get(i),
-                        cds.get(i), fric.get(i), pres.get(i), base.get(i), masses.get(i));
+    public static void main(String[] args) throws Exception {
+        // Bootstrap the same way the unit tests do, minus JUnit.
+        Module debugTranslator = new AbstractModule() {
+            @Override
+            protected void configure() {
+                bind(Translator.class).toInstance(new DebugTranslator(null));
+            }
+        };
+        Injector injector = Guice.createInjector(
+                Modules.override(new CoreModule()).with(debugTranslator), new PluginModule());
+        Application.setInjector(injector);
+
+        Rocket rocket = preparedRocket();
+        for (RocketComponent c : rocket) {
+            double m = c.getComponentMass();
+            if (m > 0.0) {
+                System.out.printf("MASS %-24s %8.5f cg=%.4f%n",
+                        c.getComponentName(), m, c.getComponentCG().x);
             }
         }
+
+        // A8: 9 N-s triangle, 3.3 g propellant, 13.1 g casing. Subsonic
+        // (Mach < 0.45) — pins the base drag model.
+        double a8 = fly(preparedRocket(), motor("A8", 9.0, 0.0164, 0.0145, 0.0131));
+        System.out.printf("APOGEE_A8 %.4f%n", a8);
+
+        // D21: 32 N-s triangle, 9.6 g propellant, 15.4 g casing. Reaches
+        // Mach 0.85 — pins the transonic pressure rise.
+        double d21 = fly(preparedRocket(), motor("D21", 32.0, 0.025, 0.020, 0.0154));
+        System.out.printf("APOGEE_D21 %.4f%n", d21);
     }
 }

@@ -47,21 +47,26 @@ jobs:
           java-version: "21"
       - name: Download OpenRocket 24.12
         run: curl -sL -o "$RUNNER_TEMP/openrocket.jar" https://github.com/openrocket/openrocket/releases/download/release-24.12/OpenRocket-24.12.jar
-      - name: Run the OpenRocket fixture flight
+      - name: Run the OpenRocket fixture flights
         id: openrocket
         working-directory: scripts/openrocket-parity
         run: |
           javac -cp "$RUNNER_TEMP/openrocket.jar" Apogee.java
           java -Djava.awt.headless=true -cp "$RUNNER_TEMP/openrocket.jar:." Apogee > out.txt
           cat out.txt
-          apogee=$(awk '/^APOGEE / { print $2 }' out.txt)
-          test -n "$apogee"
-          echo "apogee=$apogee" >> "$GITHUB_OUTPUT"
-      - name: Sanity-check the reference
-        # Guards against a wrong/corrupt jar: the fixture apogee must land
-        # within 5% of the recorded 24.12 value (409.63 m).
-        run: awk -v a="${{ steps.openrocket.outputs.apogee }}" 'BEGIN { exit (a < 389.1 || a > 430.1) }'
+          a8=$(awk '/^APOGEE_A8 / { print $2 }' out.txt)
+          d21=$(awk '/^APOGEE_D21 / { print $2 }' out.txt)
+          test -n "$a8" && test -n "$d21"
+          echo "a8=$a8" >> "$GITHUB_OUTPUT"
+          echo "d21=$d21" >> "$GITHUB_OUTPUT"
+      - name: Sanity-check the references
+        # Guards against a wrong/corrupt jar: the fixture apogees must land
+        # within 5% of the recorded 24.12 values (409.63 m / 697.02 m).
+        run: |
+          awk -v a="${{ steps.openrocket.outputs.a8 }}" 'BEGIN { exit (a < 389.1 || a > 430.1) }'
+          awk -v a="${{ steps.openrocket.outputs.d21 }}" 'BEGIN { exit (a < 662.2 || a > 731.9) }'
       - name: Flight parity against live OpenRocket
         env:
-          ROCKETS_OPENROCKET_APOGEE_M: ${{ steps.openrocket.outputs.apogee }}
+          ROCKETS_OPENROCKET_APOGEE_M: ${{ steps.openrocket.outputs.a8 }}
+          ROCKETS_OPENROCKET_D21_APOGEE_M: ${{ steps.openrocket.outputs.d21 }}
         run: cargo test --all-features openrocket_flight_parity

@@ -12,7 +12,7 @@ The crate is published on crates.io and consumes `ballistics-engine` 0.48.0 from
 
 ```toml
 [dependencies]
-rockets-engine = "0.11"
+rockets-engine = "0.12"
 ```
 
 ## Run
@@ -146,9 +146,9 @@ The atmospheric adapter uses the body's own Cd-versus-Mach curve and updates bot
 
 ### Geometry to aerodynamics
 
-A subsonic Barrowman modeler, implemented against the OpenRocket technical documentation and its `FinSetCalc`/`BarrowmanCalculator` sources. `RocketGeometry` (nose cone + body tube + trapezoidal fins) yields `analyze()`: Cd/Cnα/CP curves and the reference area, with `forces()` and `weathercock_params()` convenience builders. CP is the component moment sum (nose volume fraction + fin quarter-MAC); drag is Schoenherr/roughness-limited skin friction with fineness and fin-thickness corrections, base drag, and conical nose pressure. Fin normal force uses the Diederich formula with body and fin-count interference factors.
+A Barrowman modeler, implemented against the OpenRocket technical documentation and its `FinSetCalc`/`SymmetricComponentCalc` sources. `RocketGeometry` (nose cone + body tube + trapezoidal fins) yields `analyze()`: Cd/Cnα/CP curves and the reference area, with `forces()` and `weathercock_params()` convenience builders. CP is the component moment sum (nose volume fraction + fin MAC fraction, with the supersonic aft shift); drag is Schoenherr/roughness-limited skin friction with fineness and fin-thickness corrections, base drag, rounded-fin form drag, and conical/ogive nose wave drag. Fin normal force is Diederich subsonic and 2·A/(β·A_ref) supersonic with OpenRocket's Hermite join across the transonic region, scaled by body and fin-count interference factors.
 
-Limits, deliberately: subsonic only (Mach-1 clamp), conical/ogive/elliptical/parabolic noses, trapezoidal fins, no boat-tails or transitions. Induced drag from angle of attack uses the normal-force tilt model (Cd += Cnα·α², OpenRocket's convention). CLI: `--geometry nose=shape:L:D,tube=L:D,fins=N:cr:ct:s:m:t` with `m` the leading-edge sweep and `t` the fin thickness (metres).
+Limits, deliberately: conical/ogive/elliptical/parabolic noses, trapezoidal fins, no boat-tails or transitions, no fin-body interference drag; wave drag past Mach 1 covers conical and ogive noses only (elliptical/parabolic stay at their subsonic zero). Induced drag from angle of attack uses the normal-force tilt model (Cd += Cnα·α², OpenRocket's convention). CLI: `--geometry nose=shape:L:D,tube=L:D,fins=N:cr:ct:s:m:t` with `m` the leading-edge sweep and `t` the fin thickness (metres).
 
 The Cnα/CP output is validated against OpenRocket's own test suite (`tests/openrocket_parity.rs` reproduces BarrowmanCalculatorTest's Estes Alpha III values, three- and four-fin variants, within half a percent), and the whole flight is validated end to end: OpenRocket 24.12 flies its Alpha III fixture on its A8 motor to 409.6 m, and `openrocket_flight_parity_alpha_iii_a8` requires our apogee within 10 % of that (we fly 442.8 m). `scripts/openrocket-parity/` reproduces the OpenRocket number and documents the configuration.
 
