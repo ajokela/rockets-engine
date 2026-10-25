@@ -42,7 +42,7 @@ impl MotorFile {
         if tokens.len() < 6 {
             return Err(Error::invalid(
                 "motor file header",
-                "expected: Mfr Designation Diameter Length Delays PropellantMass TotalMass",
+                "expected: Designation Diameter Length Delays PropellantMass TotalMass [Mfr]",
             ));
         }
         let number = |token: &str, field: &'static str| -> Result<f64> {
@@ -50,25 +50,60 @@ impl MotorFile {
                 .parse()
                 .map_err(|_| Error::invalid(field, "must be numeric"))
         };
-        let (delays, propellant_mass_kg, total_mass_kg) = if tokens.len() >= 7 {
+        let numeric = |token: &str| token.parse::<f64>().is_ok();
+        // Two layouts: canonical RASP (thrustcurve.org) puts the designation
+        // first and an optional manufacturer last; our legacy inline form
+        // puts the manufacturer first.
+        let (
+            manufacturer,
+            designation,
+            diameter_mm,
+            length_mm,
+            delays,
+            propellant_mass_kg,
+            total_mass_kg,
+            header_len,
+        ) = if numeric(tokens[1]) {
+            // Designation Diameter Length Delays PropellantMass TotalMass [Mfr]
             (
-                tokens[4].to_string(),
-                number(tokens[5], "propellant_mass")?,
-                number(tokens[6], "total_mass")?,
-            )
-        } else {
-            (
-                String::new(),
+                tokens.get(6).map(|s| s.to_string()),
+                tokens[0].to_string(),
+                number(tokens[1], "diameter_mm")?,
+                number(tokens[2], "length_mm")?,
+                tokens[3].to_string(),
                 number(tokens[4], "propellant_mass")?,
                 number(tokens[5], "total_mass")?,
+                6 + usize::from(tokens.len() > 6),
             )
+        } else {
+            // Mfr Designation Diameter Length [Delays] PropellantMass TotalMass
+            if tokens.len() >= 7 {
+                (
+                    Some(tokens[0].to_string()),
+                    tokens[1].to_string(),
+                    number(tokens[2], "diameter_mm")?,
+                    number(tokens[3], "length_mm")?,
+                    tokens[4].to_string(),
+                    number(tokens[5], "propellant_mass")?,
+                    number(tokens[6], "total_mass")?,
+                    7,
+                )
+            } else {
+                (
+                    Some(tokens[0].to_string()),
+                    tokens[1].to_string(),
+                    number(tokens[2], "diameter_mm")?,
+                    number(tokens[3], "length_mm")?,
+                    String::new(),
+                    number(tokens[4], "propellant_mass")?,
+                    number(tokens[5], "total_mass")?,
+                    6,
+                )
+            }
         };
-        let diameter_mm = number(tokens[2], "diameter_mm")?;
-        let length_mm = number(tokens[3], "length_mm")?;
         // The header may share its line with thrust samples (e.g. when a paste
         // flattens newlines). Treat every token after the header as a flat
         // stream of time/thrust pairs, independent of original line breaks.
-        let header_len = if tokens.len() >= 7 { 7 } else { 6 };
         let mut stream = tokens[header_len..]
             .iter()
             .copied()
@@ -92,9 +127,20 @@ impl MotorFile {
                 "needs at least two thrust samples",
             ));
         }
+        // RASP curves start at their first sample; thrust is zero at t = 0,
+        // so prepend the origin when the file starts later (real files do).
+        if points[0].time_s > 0.0 {
+            points.insert(
+                0,
+                ThrustPoint {
+                    time_s: 0.0,
+                    thrust_n: 0.0,
+                },
+            );
+        }
         Ok(Self {
-            manufacturer: tokens[0].to_string(),
-            designation: tokens[1].to_string(),
+            manufacturer: manufacturer.unwrap_or_default(),
+            designation,
             diameter_mm,
             length_mm,
             delays,
@@ -117,6 +163,179 @@ impl MotorFile {
         Motor::new(self.curve.clone(), self.propellant_mass_kg, ignition_time_s)
     }
 }
+
+/// The built-in motor names accepted by [`motor_by_name`].
+pub const MOTOR_NAMES: &[&str] = &[
+    "estes:a8",
+    "estes:b6",
+    "estes:c6",
+    "estes:d12",
+    "aerotech:g80",
+];
+
+/// A built-in motor curve by lowercase `mfr:designation` name.
+///
+/// Curve data: RASP files from thrustcurve.org, made from NAR published
+/// static-test data (provenance in the embedded headers).
+pub fn motor_by_name(name: &str) -> Option<MotorFile> {
+    let text = match name {
+        "estes:a8" => ESTES_A8,
+        "estes:b6" => ESTES_B6,
+        "estes:c6" => ESTES_C6,
+        "estes:d12" => ESTES_D12,
+        "aerotech:g80" => AEROTECH_G80,
+        _ => return None,
+    };
+    MotorFile::parse(text).ok()
+}
+
+// Curve data: thrustcurve.org simfiles 5f4294d20002e900000004ea (D12, made
+// from NAR published data, 2000-10-03).
+const ESTES_D12: &str = "\
+D12 24 70 0-3-5-7 0.0211 0.0426 Estes
+0.049 2.569
+0.116 9.369
+0.184 17.275
+0.237 24.258
+0.282 29.73
+0.297 27.01
+0.311 22.589
+0.322 17.99
+0.348 14.126
+0.386 12.099
+0.442 10.808
+0.546 9.876
+0.718 9.306
+0.879 9.105
+1.066 8.901
+1.257 8.698
+1.436 8.31
+1.59 8.294
+1.612 4.613
+1.65 0";
+
+// Curve data: thrustcurve.org simfiles 69eb2379c7d63000021d8c29 (C6).
+const ESTES_C6: &str = "\
+C6 18 70 0-3-5-7 0.0108 0.0231 E
+0.031 0.946
+0.092 4.826
+0.139 9.936
+0.192 14.09
+0.209 11.446
+0.231 7.381
+0.248 6.151
+0.292 5.489
+0.37 4.921
+0.475 4.448
+0.671 4.258
+0.702 4.542
+0.723 4.164
+0.85 4.448
+1.063 4.353
+1.211 4.353
+1.242 4.069
+1.303 4.258
+1.468 4.353
+1.656 4.448
+1.821 4.448
+1.834 2.933
+1.847 1.325
+1.86 0";
+
+// Curve data: thrustcurve.org simfiles (A8-0).
+const ESTES_A8: &str = "\
+A8 18 70 0 0.00384 0.01389 E
+0.016 1.08
+0.036 0.293
+0.05 0.259
+0.06 0.357
+0.07 0.419
+0.08 0.355
+0.102 0.781
+0.124 1.443
+0.152 2.966
+0.17 4.426
+0.202 7.16
+0.224 9.051
+0.246 9.555
+0.256 9.317
+0.276 7.958
+0.294 6.108
+0.326 4.235
+0.35 3.813
+0.376 3.997
+0.41 3.926
+0.452 3.724
+0.474 4.046
+0.502 4.092
+0.532 4.146
+0.534 0";
+
+// Curve data: thrustcurve.org simfiles (B6-0).
+const ESTES_B6: &str = "\
+B6-0 18 70 0 0.0056 0.0156 E
+0.036 1.364
+0.064 2.727
+0.082 4.215
+0.111 6.694
+0.135 9.05
+0.146 9.545
+0.172 11.901
+0.181 12.149
+0.191 11.901
+0.211 9.174
+0.239 7.314
+0.264 6.074
+0.275 5.95
+0.333 5.207
+0.394 4.835
+0.445 4.835
+0.556 4.339
+0.667 4.587
+0.723 4.339
+0.78 4.339
+0.793 4.091
+0.812 2.603
+0.833 1.24
+0.857 0";
+
+// Curve data: thrustcurve.org simfiles 5f4294d20002e900000007dd (G80NBT).
+const AEROTECH_G80: &str = "\
+G80NBT 29 123.825 4-7-10 0.069 0.129 AT
+0.013 89.054
+0.018 101.584
+0.029 105.388
+0.047 102.927
+0.104 100.018
+0.19 102.255
+0.268 104.94
+0.306 104.269
+0.352 105.835
+0.41 104.94
+0.432 106.73
+0.512 105.612
+0.563 106.954
+0.591 104.493
+0.62 106.283
+0.715 103.15
+0.76 103.374
+0.806 101.36
+0.848 102.032
+1.2 88.383
+1.243 77.866
+1.269 57.952
+1.302 44.079
+1.329 34.011
+1.367 26.403
+1.398 22.823
+1.433 20.585
+1.48 21.704
+1.508 20.809
+1.584 13.201
+1.604 11.635
+1.652 11.188
+1.683 5.37
+1.701 0";
 
 #[cfg(feature = "ballistics")]
 pub use recovery::{Airframe, RecoveryForces};

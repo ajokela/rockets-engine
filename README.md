@@ -12,7 +12,7 @@ The crate is published on crates.io and consumes `ballistics-engine` 0.48.0 from
 
 ```toml
 [dependencies]
-rockets-engine = "0.12"
+rockets-engine = "0.13"
 ```
 
 ## Run
@@ -148,7 +148,7 @@ The atmospheric adapter uses the body's own Cd-versus-Mach curve and updates bot
 
 A Barrowman modeler, implemented against the OpenRocket technical documentation and its `FinSetCalc`/`SymmetricComponentCalc` sources. `RocketGeometry` (nose cone + body tube + trapezoidal fins) yields `analyze()`: Cd/Cnα/CP curves and the reference area, with `forces()` and `weathercock_params()` convenience builders. CP is the component moment sum (nose volume fraction + fin MAC fraction, with the supersonic aft shift); drag is Schoenherr/roughness-limited skin friction with fineness and fin-thickness corrections, base drag, rounded-fin form drag, and conical/ogive nose wave drag. Fin normal force is Diederich subsonic and 2·A/(β·A_ref) supersonic with OpenRocket's Hermite join across the transonic region, scaled by body and fin-count interference factors.
 
-Limits, deliberately: conical/ogive/elliptical/parabolic noses, trapezoidal fins, no boat-tails or transitions, no fin-body interference drag; wave drag past Mach 1 covers conical and ogive noses only (elliptical/parabolic stay at their subsonic zero). Induced drag from angle of attack uses the normal-force tilt model (Cd += Cnα·α², OpenRocket's convention). CLI: `--geometry nose=shape:L:D,tube=L:D,fins=N:cr:ct:s:m:t` with `m` the leading-edge sweep and `t` the fin thickness (metres).
+Conical boat-tails (`boat=L:foreD:aftD` in the spec) join the geometry: Barrowman transition Cnα (negative for a shrinking diameter), frustum planform CP, OpenRocket's taper pressure drag, and base drag on the reduced aft area; `--geometry-masses` takes an optional fourth mass for the shell. Limits, deliberately: conical/ogive/elliptical/parabolic noses, trapezoidal fins, conical boat-tails only (no shoulders or multi-diameter bodies), no fin-body interference drag. Nose wave drag covers all four shapes past Mach 1 (NASA TR-R-100 tables for elliptical/parabolic). Induced drag from angle of attack uses the normal-force tilt model (Cd += Cnα·α², OpenRocket's convention). CLI: `--geometry nose=shape:L:D,tube=L:D,fins=N:cr:ct:s:m:t` with `m` the leading-edge sweep and `t` the fin thickness (metres).
 
 The Cnα/CP output is validated against OpenRocket's own test suite (`tests/openrocket_parity.rs` reproduces BarrowmanCalculatorTest's Estes Alpha III values, three- and four-fin variants, within half a percent), and the whole flight is validated end to end: OpenRocket 24.12 flies its Alpha III fixture on its A8 motor to 409.6 m, and `openrocket_flight_parity_alpha_iii_a8` requires our apogee within 10 % of that (we fly 442.8 m). `scripts/openrocket-parity/` reproduces the OpenRocket number and documents the configuration.
 
@@ -158,7 +158,7 @@ The Cnα/CP output is validated against OpenRocket's own test suite (`tests/open
 
 The `model` feature (default on) adds hobbyist conveniences:
 
-- `MotorFile` parses RASP `.eng` motor text — manufacturer, designation, diameter/length, delays, propellant and total masses, and the thrust samples. `motor(ignition_s)` schedules it. `--motor-eng` takes inline text; `--motor-file` reads from disk in the native CLI.
+- `MotorFile` parses RASP `.eng` motor text — both layouts: canonical thrustcurve.org form (designation first, manufacturer last, curves starting after t = 0 with the origin prepended) and the inline manufacturer-first form. `motor(ignition_s)` schedules it. `--motor` picks a built-in NAR-data curve (estes:a8/b6/c6/d12, aerotech:g80 — real published curves with provenance); `--motor-eng` takes inline text; `--motor-file` reads from disk in the native CLI.
 - `RecoveryForces` wraps any force model and swaps in recovery drag once the vehicle is descending (strictly: `vy < 0`, so a standing wind at liftoff cannot trip the chute on the pad), with an optional absolute-time deployment gate (`--recover <cdA>`, `--recovery-after-s <t>`). Terminal velocity `sqrt(2mg/(ρ·CdA))` emerges naturally. Deployment is a pure function of state, so integration stays deterministic. Dual deployment adds a main parachute that swaps in below an altitude (`with_main`, `--recover-main <cdA> --main-altitude-m <m>`). The descent samples the same wind zones and turbulence as the ascent.
 - `Airframe::sport_24mm()` and `Airframe::high_power_54mm()` are *illustrative* presets (not measured kit data): diameter, Cd, Cnα, CP, CG, pitch inertia, induced-k and recovery Cd·A in one bundle. `--airframe sport24` or `hp54` fills the same options and composes with `--weathercock`.
 

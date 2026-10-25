@@ -37,6 +37,48 @@ fn flattened_single_line_rasp_still_parses() {
 }
 
 #[test]
+fn registry_motors_parse_and_match_their_impulse_class() {
+    let cases = [
+        ("estes:a8", 1.26, 2.5),
+        ("estes:b6", 2.5, 5.0),
+        ("estes:c6", 5.0, 10.0),
+        ("estes:d12", 10.0, 20.0),
+        ("aerotech:g80", 80.0, 160.0),
+    ];
+    for (name, lo, hi) in cases {
+        let file = rockets_engine::model_rocket::motor_by_name(name)
+            .unwrap_or_else(|| panic!("{name} should be registered"));
+        let impulse = file.curve.total_impulse_ns();
+        assert!(
+            impulse > lo && impulse <= hi,
+            "{name}: impulse {impulse} outside ({lo}, {hi}]"
+        );
+        assert!(file.propellant_mass_kg > 0.0);
+        assert!(file.total_mass_kg > file.propellant_mass_kg);
+        assert!(file.curve.points().len() >= 2);
+    }
+    assert!(rockets_engine::model_rocket::motor_by_name("estes:x9").is_none());
+}
+
+#[test]
+fn canonical_thrustcurve_layout_parses() {
+    // Real RASP files put the designation first and the manufacturer last.
+    let file =
+        MotorFile::parse("D12 24 70 0-3-5-7 0.0211 0.0426 Estes\n0.049 2.569\n1.65 0").unwrap();
+    assert_eq!(file.designation, "D12");
+    assert_eq!(file.manufacturer, "Estes");
+    assert_eq!(file.delays, "0-3-5-7");
+    assert!((file.propellant_mass_kg - 0.0211).abs() < 1e-12);
+    // The origin is prepended when the curve starts after t = 0.
+    assert_eq!(file.curve.points()[0].time_s, 0.0);
+    assert_eq!(file.curve.points().len(), 3);
+    // Six tokens: canonical without the manufacturer field.
+    let file = MotorFile::parse("A8 18 70 0 0.004 0.014\n0.016 1.08\n0.534 0").unwrap();
+    assert_eq!(file.manufacturer, "");
+    assert_eq!(file.designation, "A8");
+}
+
+#[test]
 fn parser_rejects_bad_input() {
     assert!(MotorFile::parse("").is_err());
     assert!(MotorFile::parse("Estes D12 24 70 0\n").is_err());

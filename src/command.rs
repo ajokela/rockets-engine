@@ -74,6 +74,8 @@ fn help() -> String {
      \x20 --stage <spec>          repeat for staging; replaces the single-motor\n\
      \x20                            options. spec: dry=kg,prop=kg,curve=t:N;t:N,\n\
      \x20                            ignition=s,sep=s (curve/ignition/sep optional)\n\
+     \x20 --motor <name>          built-in motor: estes:a8, estes:b6, estes:c6,\n\
+     \x20                            estes:d12, aerotech:g80 (NAR published data)\n\
      \x20 --motor-eng <text>      inline RASP .eng motor text (curve + propellant)\n\
      \x20 --motor-file <path>     .eng file on disk (native CLI only)\n\
      \x20 --recover <cdA>         drogue Cd·A in m²; recovery drag on descent\n\
@@ -84,8 +86,9 @@ fn help() -> String {
      \x20                            inertia and recovery Cd·A, illustrative only\n\
      \x20 --geometry <spec>       Barrowman modeler (subsonic + supersonic):\n\
      \x20                            nose=shape:L:D,tube=L:D,fins=N:cr:ct:s:m:t\n\
-     \x20                            (m = leading-edge sweep; t = thickness, m)\n\
-     \x20 --geometry-masses <n,t,f> structural masses (kg) for --geometry;\n\
+     \x20                            (m = leading-edge sweep; t = thickness, m);\n\
+     \x20                            optional boat=L:foreD:aftD conical boat-tail\n\
+     \x20 --geometry-masses <n,t,f[,b]> structural masses (kg) for --geometry;\n\
      \x20                            replaces --dry-mass and estimates\n\
      \x20                            --cg-dry-m/--cg-prop-m/--pitch-inertia\n\
      \x20 --duration-s <t>         total sim time [burnout + 10 s]\n\
@@ -197,8 +200,8 @@ pub(crate) struct Options {
     pub(crate) recover_main: Option<(f64, f64)>,
     pub(crate) airframe: Option<String>,
     pub(crate) geometry: Option<String>,
-    /// nose/tube/fins structural masses (kg) for --geometry.
-    pub(crate) geometry_masses: Option<(f64, f64, f64)>,
+    /// nose/tube/fins[/boat] structural masses (kg) for --geometry.
+    pub(crate) geometry_masses: Option<(f64, f64, f64, Option<f64>)>,
     /// (casing mass kg, motor length m) retained from a motor file.
     pub(crate) motor_casing: Option<(f64, f64)>,
     #[cfg(feature = "ballistics")]
@@ -409,6 +412,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     let mut stages = Vec::new();
     let mut motor_eng = None;
     let mut motor_file = None;
+    let mut motor_name = None;
     let mut recover = None;
     let mut recovery_after_s = 0.0;
     let mut recover_main = None;
@@ -531,6 +535,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
             "--stage" => stages.push(parse_stage(&value(flag)?)?),
             "--motor-eng" => motor_eng = Some(value(flag)?),
             "--motor-file" => motor_file = Some(value(flag)?),
+            "--motor" => motor_name = Some(value(flag)?),
             "--recover" => recover = Some(parse_f64(&value(flag)?, flag)?),
             "--recovery-after-s" => recovery_after_s = parse_f64(&value(flag)?, flag)?,
             "--recover-main" => recover_main = Some(parse_f64(&value(flag)?, flag)?),
@@ -540,19 +545,25 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
             "--geometry-masses" => {
                 let raw = value(flag)?;
                 let parts: Vec<&str> = raw.split(',').collect();
-                if parts.len() != 3 {
-                    return Err("error: --geometry-masses needs nose,tube,fins in kg".to_string());
+                if !(3..=4).contains(&parts.len()) {
+                    return Err(
+                        "error: --geometry-masses needs nose,tube,fins[,boat] in kg".to_string()
+                    );
                 }
                 let nose = parse_f64(parts[0], flag)?;
                 let tube = parse_f64(parts[1], flag)?;
                 let fins = parse_f64(parts[2], flag)?;
-                if nose <= 0.0 || tube <= 0.0 || fins < 0.0 {
+                let boat = match parts.get(3) {
+                    Some(p) => Some(parse_f64(p, flag)?),
+                    None => None,
+                };
+                if nose <= 0.0 || tube <= 0.0 || fins < 0.0 || boat.is_some_and(|b| b < 0.0) {
                     return Err(
-                        "error: --geometry-masses needs positive nose/tube and non-negative fins"
+                        "error: --geometry-masses needs positive nose/tube and non-negative fins/boat"
                             .to_string(),
                     );
                 }
-                geometry_masses = Some((nose, tube, fins));
+                geometry_masses = Some((nose, tube, fins, boat));
             }
             "--runs" => {
                 runs = value(flag)?
@@ -618,16 +629,24 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
         i += 1;
     }
 
-    let motor_source = match (motor_eng, motor_file) {
-        (Some(_), Some(_)) => {
-            return Err("error: use only one of --motor-eng and --motor-file".to_string())
+    let motor_source = match (motor_eng, motor_file, motor_name) {
+        (Some(_), Some(_), _) | (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
+            return Err("error: use only one of --motor, --motor-eng and --motor-file".to_string())
         }
-        (Some(text), None) => {
+        (Some(text), None, None) => {
             let text = text.replace("\\n", "\n");
             Some(crate::model_rocket::MotorFile::parse(&text).map_err(fmt_err)?)
         }
-        (None, Some(path)) => Some(load_motor_file(&path)?),
-        (None, None) => None,
+        (None, Some(path), None) => Some(load_motor_file(&path)?),
+        (None, None, Some(name)) => {
+            Some(crate::model_rocket::motor_by_name(&name).ok_or_else(|| {
+                format!(
+                    "error: unknown motor '{name}' (one of: {})",
+                    crate::model_rocket::MOTOR_NAMES.join(", ")
+                )
+            })?)
+        }
+        (None, None, None) => None,
     };
     if motor_source.is_some() && (curve.is_some() || propellant.is_some() || !stages.is_empty()) {
         return Err(
@@ -671,8 +690,8 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
             return Err("error: use either --dry-mass or --geometry-masses".to_string())
         }
         (Some(m), None) => m,
-        (None, Some((nose, tube, fins))) => {
-            nose + tube + fins + motor_casing.map(|c| c.0).unwrap_or(0.0)
+        (None, Some((nose, tube, fins, boat))) => {
+            nose + tube + fins + boat.unwrap_or(0.0) + motor_casing.map(|c| c.0).unwrap_or(0.0)
         }
         (None, None) => return Err("error: --dry-mass is required".to_string()),
     };
@@ -1009,14 +1028,21 @@ pub(crate) fn run_trajectory(
                     cgp = Some(analysis.total_length_m - length_m / 2.0);
                 }
             }
-            if let Some((nose_kg, tube_kg, fins_kg)) = opts.geometry_masses {
+            if let Some((nose_kg, tube_kg, fins_kg, boat_kg)) = opts.geometry_masses {
+                let model = geometry_model
+                    .as_ref()
+                    .expect("geometry masses imply geometry");
+                if model.boat_tail.is_some() != boat_kg.is_some() {
+                    return Err(
+                        "error: --geometry-masses needs a fourth (boat) mass iff the geometry has a boat= tail"
+                            .to_string(),
+                    );
+                }
                 let casing = opts
                     .motor_casing
                     .map(|(kg, length_m)| (kg, analysis.total_length_m - length_m / 2.0));
-                let props = geometry_model
-                    .as_ref()
-                    .expect("geometry masses imply geometry")
-                    .mass_properties(nose_kg, tube_kg, fins_kg, casing);
+                let props =
+                    model.mass_properties_with_boat(nose_kg, tube_kg, fins_kg, boat_kg, casing);
                 if cgd.is_none() {
                     cgd = Some(props.dry_cg_m);
                 }
@@ -1822,6 +1848,34 @@ mod tests {
 
     #[cfg(feature = "ballistics")]
     #[test]
+    fn boat_tail_geometry_flies() {
+        let out = run(&argv(
+            "simulate --motor estes:d12 \
+             --geometry nose=conical:0.1:0.024,tube=0.4:0.024,fins=3:0.05:0.03:0.04:0.02:0.002,boat=0.06:0.024:0.016 \
+             --geometry-masses 0.012,0.020,0.006,0.004 --weathercock --recover 0.25 \
+             --duration-s 3 --dt-s 0.5",
+        ))
+        .unwrap();
+        assert!(out.contains("burning"), "got {out}");
+        // The fourth mass is required iff the geometry has a boat-tail.
+        let err = run(&argv(
+            "simulate --motor estes:d12 \
+             --geometry nose=conical:0.1:0.024,tube=0.4:0.024,fins=3:0.05:0.03:0.04:0.02:0.002,boat=0.06:0.024:0.016 \
+             --geometry-masses 0.012,0.020,0.006 --weathercock",
+        ))
+        .unwrap_err();
+        assert!(err.contains("fourth (boat) mass"), "got {err}");
+        let err = run(&argv(
+            "simulate --motor estes:d12 \
+             --geometry nose=conical:0.1:0.024,tube=0.4:0.024,fins=3:0.05:0.03:0.04:0.02:0.002 \
+             --geometry-masses 0.012,0.020,0.006,0.004 --weathercock",
+        ))
+        .unwrap_err();
+        assert!(err.contains("fourth (boat) mass"), "got {err}");
+    }
+
+    #[cfg(feature = "ballistics")]
+    #[test]
     fn geometry_masses_estimate_cg_and_inertia() {
         // No --dry-mass/--cg-dry-m/--cg-prop-m/--pitch-inertia: the mass
         // model fills them from the geometry and the motor file.
@@ -1870,6 +1924,22 @@ mod tests {
         ))
         .unwrap();
         assert!(out.contains("burning"), "got {out}");
+    }
+
+    #[test]
+    fn registry_motor_flies_and_validates() {
+        let out = run(&argv(
+            "simulate --motor estes:d12 --dry-mass 0.1 --duration-s 3 --dt-s 0.5",
+        ))
+        .unwrap();
+        assert!(out.contains("burning"), "got {out}");
+        let err = run(&argv("simulate --motor estes:x9 --dry-mass 0.1")).unwrap_err();
+        assert!(err.contains("unknown motor"), "got {err}");
+        let err = run(&argv(
+            "simulate --motor estes:d12 --motor-eng 'Estes A8 18 70 0 0.004 0.014\\n0 0\\n0.5 8\\n0.8 0' --dry-mass 0.1",
+        ))
+        .unwrap_err();
+        assert!(err.contains("use only one of"), "got {err}");
     }
 
     #[test]

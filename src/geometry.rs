@@ -105,6 +105,20 @@ pub struct TrapezoidalFins {
 }
 
 /// The complete slender geometry.
+/// A conical boat-tail (diameter-reducing transition) at the very aft end
+/// of the body tube.
+#[derive(Debug, Clone, Copy)]
+pub struct BoatTail {
+    /// Transition length in metres.
+    pub length_m: f64,
+    /// Diameter at the forward end (must equal the body tube diameter).
+    pub fore_diameter_m: f64,
+    /// Diameter at the aft end (must be smaller than the forward diameter).
+    pub aft_diameter_m: f64,
+}
+
+/// A slender rocket: nose cone, body tube, trapezoidal fin set and an
+/// optional conical boat-tail.
 #[derive(Debug, Clone, Copy)]
 pub struct RocketGeometry {
     /// Nose cone.
@@ -113,9 +127,34 @@ pub struct RocketGeometry {
     pub tube: BodyTube,
     /// Aft trapezoidal fin set.
     pub fins: TrapezoidalFins,
+    /// Optional conical boat-tail aft of the fins.
+    pub boat_tail: Option<BoatTail>,
     /// Roughness height in metres (default 20 µm, painted surface).
     pub roughness_m: f64,
 }
+
+/// NASA TR-R-100 zero-lift pressure drag for fineness-3 noses (from
+/// OpenRocket's SymmetricComponentCalc), extrapolated to other fineness
+/// ratios by the stagnation-scaled power law.
+const ELLIPSOID_TABLE: &[(f64, f64)] = &[
+    (1.2, 0.110),
+    (1.25, 0.128),
+    (1.3, 0.140),
+    (1.4, 0.148),
+    (1.6, 0.152),
+    (2.0, 0.159),
+    (2.4, 0.162),
+];
+const PARABOLIC_TABLE: &[(f64, f64)] = &[
+    (0.95, 0.0),
+    (0.975, 0.016),
+    (1.0, 0.041),
+    (1.05, 0.092),
+    (1.1, 0.109),
+    (1.2, 0.119),
+    (1.4, 0.113),
+    (1.7, 0.108),
+];
 
 impl RocketGeometry {
     /// Build with the default painted-surface roughness (20 µm).
@@ -124,6 +163,7 @@ impl RocketGeometry {
             nose,
             tube,
             fins,
+            boat_tail: None,
             roughness_m: 20e-6,
         }
     }
@@ -134,9 +174,32 @@ impl RocketGeometry {
         self
     }
 
-    /// Total aerodynamic length (nose + tube).
+    /// Attach a conical boat-tail at the aft end of the tube. Its forward
+    /// diameter must match the tube and its aft diameter must be smaller.
+    pub fn with_boat_tail(mut self, boat_tail: BoatTail) -> Result<Self> {
+        if boat_tail.length_m <= 0.0 || !boat_tail.length_m.is_finite() {
+            return Err(Error::invalid("boat tail", "length must be positive"));
+        }
+        if (boat_tail.fore_diameter_m - self.tube.diameter_m).abs() > 1e-12 {
+            return Err(Error::invalid(
+                "boat tail",
+                "forward diameter must equal the body tube diameter",
+            ));
+        }
+        if boat_tail.aft_diameter_m <= 0.0 || boat_tail.aft_diameter_m >= boat_tail.fore_diameter_m
+        {
+            return Err(Error::invalid(
+                "boat tail",
+                "aft diameter must be positive and smaller than the forward diameter",
+            ));
+        }
+        self.boat_tail = Some(boat_tail);
+        Ok(self)
+    }
+
+    /// Total aerodynamic length (nose + tube + boat-tail).
     pub fn total_length_m(&self) -> f64 {
-        self.nose.length_m + self.tube.length_m
+        self.nose.length_m + self.tube.length_m + self.boat_tail.map(|b| b.length_m).unwrap_or(0.0)
     }
 
     /// Largest body diameter (nose base or tube).
@@ -233,13 +296,9 @@ impl RocketGeometry {
         // angle; for a tangent ogive the surface at the base is nearly
         // axial, so its wave drag is essentially zero — matching OpenRocket.
         let sinphi = match self.nose.shape {
-            NoseShape::Conical | NoseShape::Ogive => {
-                let l = self.nose.length_m;
-                let r = self.nose.diameter_m / 2.0;
-                let r_tip = self.nose_radius(0.99 * l);
-                (r - r_tip) / (r - r_tip).hypot(0.01 * l)
-            }
-            _ => return 0.0,
+            NoseShape::Conical | NoseShape::Ogive => self.nose_sinphi(),
+            NoseShape::Elliptical => return self.table_pressure_cd(mach, ELLIPSOID_TABLE),
+            NoseShape::Parabolic => return self.table_pressure_cd(mach, PARABOLIC_TABLE),
         };
         const GAMMA: f64 = 1.4;
         let cd_mach0 = 0.8 * sinphi * sinphi;
@@ -263,6 +322,69 @@ impl RocketGeometry {
         }
         let b = min_deriv / gap;
         gap * mach.powf(b) + cd_mach0
+    }
+
+    /// sin(phi) of the nose surface at 99% of the length (OpenRocket's
+    /// SymmetricComponentCalc convention).
+    fn nose_sinphi(&self) -> f64 {
+        let l = self.nose.length_m;
+        let r = self.nose.diameter_m / 2.0;
+        let r_tip = self.nose_radius(0.99 * l);
+        (r - r_tip) / (r - r_tip).hypot(0.01 * l)
+    }
+
+    /// Stagnation-pressure Cd, OpenRocket's formula.
+    fn stagnation_cd(mach: f64) -> f64 {
+        let m2 = mach * mach;
+        if mach <= 1.0 {
+            0.85 * (1.0 + m2 / 4.0 + m2 * m2 / 40.0)
+        } else {
+            0.85 * (1.84 - 0.76 / m2 + 0.166 / (m2 * m2) + 0.035 / (m2 * m2 * m2))
+        }
+    }
+
+    /// Linear interpolation in a (mach, cd) table, clamped at the ends.
+    fn table_interp(table: &[(f64, f64)], mach: f64) -> f64 {
+        if mach <= table[0].0 {
+            return table[0].1;
+        }
+        for pair in table.windows(2) {
+            let (lo, hi) = (pair[0], pair[1]);
+            if mach <= hi.0 {
+                let f = (mach - lo.0) / (hi.0 - lo.0);
+                return lo.1 + f * (hi.1 - lo.1);
+            }
+        }
+        table[table.len() - 1].1
+    }
+
+    /// Nose pressure drag from the NASA TR-R-100 fineness-3 tables
+    /// (OpenRocket's SymmetricComponentCalc), extrapolated to this nose's
+    /// fineness ratio and joined subsonically by the a·M^b + Cd(0) fit.
+    fn table_pressure_cd(&self, mach: f64, table: &[(f64, f64)]) -> f64 {
+        let fineness = self.nose.length_m / self.nose.diameter_m;
+        let log4 = (fineness + 1.0).ln() / 4.0_f64.ln();
+        let value_at = |m: f64| {
+            let stag = Self::stagnation_cd(m);
+            stag * (Self::table_interp(table, m) / stag).powf(log4)
+        };
+        let min = table[0].0;
+        if mach >= min {
+            return value_at(mach);
+        }
+        let cd_mach0 = 0.8 * self.nose_sinphi().powi(2);
+        let min_value = value_at(min);
+        if min_value < 0.001 {
+            return cd_mach0;
+        }
+        let min_deriv = (value_at(min + 0.01) - min_value) / 0.01;
+        let gap = min_value - cd_mach0;
+        if gap <= 0.01 || min_deriv <= 0.01 {
+            return cd_mach0;
+        }
+        let b = min * min_deriv / gap;
+        let a = gap / min.powf(b);
+        a * mach.powf(b) + cd_mach0
     }
 
     fn midchord_cos(&self) -> f64 {
@@ -371,9 +493,9 @@ impl RocketGeometry {
             * (self.fins.count as f64 / 2.0)
     }
 
-    /// Fin CP measured from the nose tip (fin trailing edge at body end).
+    /// Fin CP measured from the nose tip (fin trailing edge at tube end).
     fn fin_cp_abs(&self, mach: f64) -> f64 {
-        self.total_length_m() - self.fins.root_chord_m + self.fin_cp(mach)
+        self.nose.length_m + self.tube.length_m - self.fins.root_chord_m + self.fin_cp(mach)
     }
 
     /// Nose radius profile r(x) with x measured from the tip.
@@ -450,13 +572,27 @@ impl RocketGeometry {
         fins_kg: f64,
         casing: Option<(f64, f64)>,
     ) -> MassProperties {
+        self.mass_properties_with_boat(nose_kg, tube_kg, fins_kg, None, casing)
+    }
+
+    /// [`mass_properties`](Self::mass_properties) with an optional boat-tail
+    /// shell mass (treated as a thin-walled frustum).
+    pub fn mass_properties_with_boat(
+        &self,
+        nose_kg: f64,
+        tube_kg: f64,
+        fins_kg: f64,
+        boat_kg: Option<f64>,
+        casing: Option<(f64, f64)>,
+    ) -> MassProperties {
         assert!(
             nose_kg >= 0.0 && tube_kg >= 0.0 && fins_kg >= 0.0,
             "component masses must be non-negative"
         );
         let (nose_cg, nose_inertia) = self.nose_volume_properties();
         let tube_cg = self.nose.length_m + self.tube.length_m / 2.0;
-        let fin_cg = self.total_length_m() - self.fins.root_chord_m + self.fin_planform_cg();
+        let fin_cg = self.nose.length_m + self.tube.length_m - self.fins.root_chord_m
+            + self.fin_planform_cg();
         let mut parts: Vec<(f64, f64, f64)> = vec![
             (nose_kg, nose_cg, nose_kg * nose_inertia),
             (
@@ -466,6 +602,21 @@ impl RocketGeometry {
             ),
             (fins_kg, fin_cg, 0.0),
         ];
+        if let (Some(b), Some(kg)) = (self.boat_tail, boat_kg) {
+            let rf = b.fore_diameter_m / 2.0;
+            let ra = b.aft_diameter_m / 2.0;
+            // Thin-walled frustum shell: lateral centroid and a mean-radius
+            // thin-shell inertia estimate.
+            let cg = self.nose.length_m
+                + self.tube.length_m
+                + b.length_m * (rf + 2.0 * ra) / (3.0 * (rf + ra));
+            let mean_r = (rf + ra) / 2.0;
+            parts.push((
+                kg,
+                cg,
+                kg * (b.length_m.powi(2) / 12.0 + mean_r * mean_r / 2.0),
+            ));
+        }
         if let Some((kg, cg)) = casing {
             parts.push((kg, cg, 0.0));
         }
@@ -481,13 +632,75 @@ impl RocketGeometry {
         }
     }
 
-    /// Total CP from the component moment sum (nose + fin set).
+    /// Boat-tail normal-force slope: 2·((r_aft/r_fore)² − 1), negative for a
+    /// diameter-reducing transition (Barrowman).
+    fn boat_cna(&self) -> f64 {
+        match self.boat_tail {
+            Some(b) => {
+                let ratio = b.aft_diameter_m / b.fore_diameter_m;
+                2.0 * (ratio * ratio - 1.0)
+            }
+            None => 0.0,
+        }
+    }
+
+    /// Boat-tail CP from the nose tip: the frustum planform centroid,
+    /// x̄ = L·(r_fore + 3·r_aft)/(4·(r_fore + r_aft)) from its forward end.
+    fn boat_cp_abs(&self) -> f64 {
+        match self.boat_tail {
+            Some(b) => {
+                let rf = b.fore_diameter_m / 2.0;
+                let ra = b.aft_diameter_m / 2.0;
+                self.nose.length_m
+                    + self.tube.length_m
+                    + b.length_m * (rf + 3.0 * ra) / (4.0 * (rf + ra))
+            }
+            None => 0.0,
+        }
+    }
+
+    /// Boat-tail pressure drag (OpenRocket's SymmetricComponentCalc):
+    /// long gentle tapers (fineness ≥ 3) are free; shorter ones pay the
+    /// base drag over the annulus area, scaled by (3 − fineness)/2.
+    fn boat_pressure_cd(&self, mach: f64) -> f64 {
+        let Some(b) = self.boat_tail else {
+            return 0.0;
+        };
+        let fineness = b.length_m / (b.fore_diameter_m - b.aft_diameter_m);
+        if fineness >= 3.0 {
+            return 0.0;
+        }
+        let annulus =
+            std::f64::consts::FRAC_PI_4 * (b.fore_diameter_m.powi(2) - b.aft_diameter_m.powi(2));
+        let cd = Self::base_cd(mach) * annulus / self.ref_area_m2();
+        if fineness <= 1.0 {
+            cd
+        } else {
+            cd * (3.0 - fineness) / 2.0
+        }
+    }
+
+    /// Base-drag scaling: the base area shrinks to the boat-tail's aft face.
+    fn base_area_fraction(&self) -> f64 {
+        match self.boat_tail {
+            Some(b) => (b.aft_diameter_m / self.max_diameter_m()).powi(2),
+            None => 1.0,
+        }
+    }
+
+    /// Total CP from the component moment sum (nose + fin set + boat-tail).
     fn total_cp(&self, mach: f64) -> f64 {
         let nose_cna = 2.0;
         let fin_cna = self.fin_set_cna(mach);
+        let boat_cna = self.boat_cna();
+        let total = nose_cna + fin_cna + boat_cna;
+        if total <= 0.0 {
+            return f64::NAN;
+        }
         (nose_cna * self.nose.length_m * self.nose.shape.cp_fraction()
-            + fin_cna * self.fin_cp_abs(mach))
-            / (nose_cna + fin_cna)
+            + fin_cna * self.fin_cp_abs(mach)
+            + boat_cna * self.boat_cp_abs())
+            / total
     }
 
     #[cfg(test)]
@@ -520,11 +733,21 @@ impl RocketGeometry {
         let r = self.max_diameter_m() / 2.0;
         let fineness = length / r;
         let correction = 1.0 + 1.0 / (2.0 * fineness);
+        let boat_wet = match self.boat_tail {
+            Some(b) => {
+                let rf = b.fore_diameter_m / 2.0;
+                let ra = b.aft_diameter_m / 2.0;
+                let slant = (b.length_m.powi(2) + (rf - ra).powi(2)).sqrt();
+                std::f64::consts::PI * (rf + ra) * slant
+            }
+            None => 0.0,
+        };
         let body_wet = self
             .nose
             .shape
             .lateral_area(self.nose.length_m, self.nose.diameter_m)
-            + std::f64::consts::PI * self.tube.diameter_m * self.tube.length_m;
+            + std::f64::consts::PI * self.tube.diameter_m * self.tube.length_m
+            + boat_wet;
         let fin_wet = 2.0 * self.fins.count as f64 * self.fin_area();
         let thickness_factor = 1.0 + 2.0 * self.fins.thickness_m / self.mac();
         cf * (correction * body_wet + thickness_factor * fin_wet) / self.ref_area_m2()
@@ -543,17 +766,19 @@ impl RocketGeometry {
         for &m in &machs {
             cd_vs_mach.push((
                 m,
-                Self::base_cd(m)
+                Self::base_cd(m) * self.base_area_fraction()
                     + self.nose_pressure_cd(m)
                     + self.fin_pressure_cd(m)
+                    + self.boat_pressure_cd(m)
                     + self.friction_cd(m, 340.0),
             ));
             let fin_cna = self.fin_set_cna(m);
-            cna_vs_mach.push((m, 2.0 + fin_cna));
+            let total_cna = 2.0 + fin_cna + self.boat_cna();
+            cna_vs_mach.push((m, total_cna));
             cp_vs_mach.push((m, self.total_cp(m)));
             // Induced drag from the normal force's tilt onto the flight
             // path: Cd_induced = Cnα·α², so k = Cnα (OpenRocket's model).
-            induced_k_vs_mach.push((m, 2.0 + fin_cna));
+            induced_k_vs_mach.push((m, total_cna));
         }
         AeroAnalysis {
             cd_vs_mach,
@@ -577,12 +802,15 @@ impl RocketGeometry {
 }
 
 /// Parse the compact geometry spec used by the CLI:
-/// `nose=shape:length:diameter,tube=length:diameter,fins=count:root:tip:span:sweep:thickness`.
-/// The fin thickness is optional (default 2 mm). Lengths are in metres.
+/// `nose=shape:length:diameter,tube=length:diameter,fins=count:root:tip:span:sweep:thickness`,
+/// with an optional `boat=length:fore_diameter:aft_diameter` conical boat-tail
+/// at the aft end. The fin thickness is optional (default 2 mm). Lengths are
+/// in metres.
 pub fn parse_geometry(spec: &str) -> Result<RocketGeometry> {
     let mut nose = None;
     let mut tube = None;
     let mut fins = None;
+    let mut boat_tail = None;
     for item in spec.split(',') {
         let (key, val) = item
             .split_once('=')
@@ -635,22 +863,39 @@ pub fn parse_geometry(spec: &str) -> Result<RocketGeometry> {
                     thickness_m: if parts.len() == 6 { number(5)? } else { 0.002 },
                 });
             }
+            "boat" => {
+                if parts.len() != 3 {
+                    return Err(Error::invalid(
+                        "boat",
+                        "expected boat=length:fore_diameter:aft_diameter",
+                    ));
+                }
+                boat_tail = Some(BoatTail {
+                    length_m: number(0)?,
+                    fore_diameter_m: number(1)?,
+                    aft_diameter_m: number(2)?,
+                });
+            }
             other => {
                 return Err(Error::invalid(
                     "geometry key",
                     match other {
                         "nose" | "tube" | "fins" => unreachable!(),
-                        _ => "must be nose, tube or fins",
+                        _ => "must be nose, tube, fins or boat",
                     },
                 ))
             }
         }
     }
-    Ok(RocketGeometry::new(
+    let geometry = RocketGeometry::new(
         nose.ok_or_else(|| Error::invalid("geometry", "nose is required"))?,
         tube.ok_or_else(|| Error::invalid("geometry", "tube is required"))?,
         fins.ok_or_else(|| Error::invalid("geometry", "fins are required"))?,
-    ))
+    );
+    match boat_tail {
+        Some(boat) => geometry.with_boat_tail(boat),
+        None => Ok(geometry),
+    }
 }
 
 /// Dry-mass breakdown estimated from geometry and component masses by
@@ -811,6 +1056,118 @@ mod tests {
             "{}",
             geo.fin_cp(0.0)
         );
+    }
+
+    #[test]
+    fn boat_tail_physics() {
+        let base = example();
+        let with_boat = base
+            .with_boat_tail(BoatTail {
+                length_m: 0.06,
+                fore_diameter_m: 0.024,
+                aft_diameter_m: 0.016,
+            })
+            .unwrap();
+        // Cnα drops by 2·(1 − (2/3)²) = 10/9 ≈ 1.111.
+        let delta = base.fin_set_cna(0.0) + 2.0 - (with_boat.fin_set_cna(0.0) + 2.0);
+        let expected = 2.0 * (1.0 - (0.016_f64 / 0.024).powi(2));
+        assert!((with_boat.boat_cna() + expected).abs() < 1e-12);
+        assert!((delta - 0.0).abs() < 1e-12 || delta > 0.0); // fins unchanged
+        let cna_base = base.analyze().cna_vs_mach[0].1;
+        let cna_boat = with_boat.analyze().cna_vs_mach[0].1;
+        assert!(
+            (cna_base - cna_boat - expected).abs() < 1e-9,
+            "{cna_base} vs {cna_boat}"
+        );
+        // CP: frustum centroid at nose+tube + L·(rf+3ra)/(4(rf+ra)).
+        let cp = with_boat.boat_cp_abs();
+        let want = 0.1 + 0.4 + 0.06 * (0.012 + 3.0 * 0.008) / (4.0 * (0.012 + 0.008));
+        assert!((cp - want).abs() < 1e-12, "{cp} vs {want}");
+        // Pressure drag: fineness = 0.06/0.008 = 7.5 ≥ 3 → zero; short tail pays.
+        assert_eq!(with_boat.boat_pressure_cd(0.5), 0.0);
+        let stubby = base
+            .with_boat_tail(BoatTail {
+                length_m: 0.012,
+                fore_diameter_m: 0.024,
+                aft_diameter_m: 0.016,
+            })
+            .unwrap();
+        assert!(stubby.boat_pressure_cd(0.5) > 0.0);
+        // Base area shrinks to (aft/fore)².
+        assert!((with_boat.base_area_fraction() - (0.016_f64 / 0.024).powi(2)).abs() < 1e-12);
+        // Total length includes the boat-tail; fins stay at the tube end.
+        assert!((with_boat.total_length_m() - 0.56).abs() < 1e-12);
+        assert!((with_boat.fin_cp_abs(0.0) - base.fin_cp_abs(0.0)).abs() < 1e-12);
+        // Validation.
+        assert!(base
+            .with_boat_tail(BoatTail {
+                length_m: 0.06,
+                fore_diameter_m: 0.03,
+                aft_diameter_m: 0.016,
+            })
+            .is_err());
+        assert!(base
+            .with_boat_tail(BoatTail {
+                length_m: 0.06,
+                fore_diameter_m: 0.024,
+                aft_diameter_m: 0.03,
+            })
+            .is_err());
+        // Parse end to end.
+        let parsed = parse_geometry(
+            "nose=conical:0.1:0.024,tube=0.4:0.024,fins=3:0.05:0.03:0.04:0.02:0.002,boat=0.06:0.024:0.016",
+        )
+        .unwrap();
+        assert!(parsed.boat_tail.is_some());
+        assert!(parse_geometry(
+            "nose=conical:0.1:0.024,tube=0.4:0.024,fins=3:0.05:0.03:0.04:0.02:0.002,boat=0.06:0.024:0.03",
+        )
+        .is_err());
+        // Mass model: the boat shell joins the component sum.
+        let props = with_boat.mass_properties_with_boat(0.012, 0.020, 0.006, Some(0.004), None);
+        assert!((props.dry_mass_kg - 0.042).abs() < 1e-12);
+        assert!(props.pitch_inertia_kg_m2 > 0.0);
+    }
+
+    #[test]
+    fn elliptical_and_parabolic_noses_use_the_nasa_tables() {
+        let elliptical = RocketGeometry::new(
+            NoseCone {
+                shape: NoseShape::Elliptical,
+                length_m: 0.072,
+                diameter_m: 0.024,
+            },
+            example().tube,
+            example().fins,
+        );
+        // Fineness 3 reproduces the table value at Mach 1.4 (0.148).
+        assert!(
+            (elliptical.nose_pressure_cd(1.4) - 0.148).abs() < 0.005,
+            "{}",
+            elliptical.nose_pressure_cd(1.4)
+        );
+        // Subsonic is ~zero (the 99% surface angle is tiny).
+        assert!(elliptical.nose_pressure_cd(0.5) < 0.02);
+        let parabolic = RocketGeometry::new(
+            NoseCone {
+                shape: NoseShape::Parabolic,
+                length_m: 0.072,
+                diameter_m: 0.024,
+            },
+            example().tube,
+            example().fins,
+        );
+        // Parabolic table is zero below 0.95 and 0.092 at 1.05.
+        assert!(parabolic.nose_pressure_cd(0.8) < 1e-4);
+        assert!(
+            (parabolic.nose_pressure_cd(1.05) - 0.092).abs() < 0.005,
+            "{}",
+            parabolic.nose_pressure_cd(1.05)
+        );
+        // Stagnation Cd is continuous across Mach 1.
+        let lo = RocketGeometry::stagnation_cd(0.999);
+        let hi = RocketGeometry::stagnation_cd(1.001);
+        assert!((lo - hi).abs() < 0.01, "{lo} vs {hi}");
     }
 
     #[test]
