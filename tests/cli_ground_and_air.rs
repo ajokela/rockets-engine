@@ -218,3 +218,125 @@ fn the_plot_floor_is_the_ground() {
         .unwrap();
     assert!(floor.starts_with("|*"), "{floor}");
 }
+
+const ARC: &str = "simulate --curve 0:0,0.05:50,0.1:0 --dry-mass 1.0 --propellant-mass 0.01 \
+                   --speed-mps 1000 --elevation-deg 45 --duration-s 400 --dt-s 1 --gravity central";
+
+/// The summary's impact numbers: x, z, t and speed.
+fn impact_numbers(out: &str) -> Vec<f64> {
+    line_starting(out, "impact")
+        .split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+        .filter_map(|t| t.parse().ok())
+        .collect()
+}
+
+#[test]
+fn central_gravity_lands_on_the_sphere_in_either_frame() {
+    // A ~100 km arc: the sphere falls ~800 m below the launch tangent plane,
+    // so landing on the sphere is late by seconds, and the Earth-centred
+    // frame (where Y never nears 0) must land too, on the same spot.
+    let local = sim(&format!("{ARC} --center 0,-6371000,0")).unwrap();
+    let centred = sim(&format!("{ARC} --position-m 0,6371000,0")).unwrap();
+    let (a, b) = (impact_numbers(&local), impact_numbers(&centred));
+    assert_eq!(a.len(), 4, "{a:?}");
+    for (u, v) in a.iter().zip(&b) {
+        assert!(
+            (u - v).abs() < 0.02,
+            "launch-local {a:?} vs Earth-centred {b:?}"
+        );
+    }
+    let rows: Vec<(f64, f64)> = sim(&format!("{ARC} --center 0,-6371000,0 --format csv"))
+        .unwrap()
+        .lines()
+        .skip(1)
+        .map(|l| {
+            let c: Vec<f64> = l.split(',').take(3).map(|v| v.parse().unwrap()).collect();
+            (c[0], c[2])
+        })
+        .collect();
+    let plane_crossing = rows
+        .windows(2)
+        .find(|w| w[0].1 > 0.0 && w[1].1 <= 0.0)
+        .map(|w| w[0].0 + (w[1].0 - w[0].0) * w[0].1 / (w[0].1 - w[1].1))
+        .unwrap();
+    // ~800 m of drop at ~700 m/s of descent: about 1.2 s later.
+    assert!(
+        a[2] > plane_crossing + 0.5,
+        "impact t {} should follow the tangent-plane crossing at {plane_crossing}",
+        a[2]
+    );
+}
+
+#[test]
+fn central_gravity_ground_is_radius_plus_ground_altitude() {
+    // Launch-local from the default pad (0, E, 0), Earth-centred from R + E,
+    // and another planet with its own radius.
+    let local = sim(&format!(
+        "{ARC} --center 0,-6371000,0 --ground-altitude-m 1500"
+    ))
+    .unwrap();
+    let centred = sim(&format!(
+        "{ARC} --position-m 0,6372500,0 --ground-altitude-m 1500"
+    ))
+    .unwrap();
+    let (a, b) = (impact_numbers(&local), impact_numbers(&centred));
+    for (u, v) in a.iter().zip(&b) {
+        assert!(
+            (u - v).abs() < 0.02,
+            "launch-local {a:?} vs Earth-centred {b:?}"
+        );
+    }
+    let moon = sim(&format!(
+        "{ARC} --mu 4.9048695e12 --radius-m 1737400 --center 0,-1737400,0 --duration-s 4000 --dt-s 5"
+    ))
+    .unwrap();
+    assert!(impact_numbers(&moon)[0] > 0.0);
+}
+
+#[test]
+fn a_start_inside_the_ground_sphere_is_refused() {
+    for line in [
+        // Default center and pad: the start is at the planet's center.
+        ARC.to_string(),
+        format!("{ARC} --position-m 0,6370000,0"),
+        format!("{ARC} --position-m 0,6371000,0 --ground-altitude-m 1500"),
+        format!("{ARC} --center 0,-6371000,0 --radius-m 6371001"),
+    ] {
+        let err = sim(&line).unwrap_err();
+        assert!(err.contains("inside the ground"), "{line}: {err}");
+    }
+}
+
+#[test]
+fn recovery_and_the_space_switch_are_refused_under_central_gravity() {
+    let local = format!("{ARC} --center 0,-6371000,0");
+    let err = sim(&format!("{local} --recover 0.5")).unwrap_err();
+    assert!(err.contains("--recover needs the flat frame"), "{err}");
+    let err = sim(&format!("{local} --recover 0.5 --recover-main 1")).unwrap_err();
+    assert!(err.contains("--recover needs the flat frame"), "{err}");
+    let err = sim(&format!("{local} --space-above-m 80000")).unwrap_err();
+    assert!(err.contains("--space-above-m does nothing"), "{err}");
+}
+
+#[test]
+fn air_reading_forces_are_refused_under_central_gravity() {
+    let local = format!("{ARC} --center 0,-6371000,0");
+    for extra in [
+        "--diameter-m 0.05 --cd 0:0.4,3:0.4",
+        "--weathercock",
+        "--airframe sport24 --weathercock",
+        "--cna 0:2,3:2 --lift-k 0:0,3:0.5",
+    ] {
+        let err = sim(&format!("{local} {extra}")).unwrap_err();
+        assert!(
+            err.contains("central gravity and the drag adapter"),
+            "{extra}: {err}"
+        );
+    }
+}
+
+#[test]
+fn radius_needs_central_gravity() {
+    let err = sim(&format!("{SHOT} --radius-m 6371000")).unwrap_err();
+    assert!(err.contains("--radius-m needs --gravity central"), "{err}");
+}

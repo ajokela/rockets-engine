@@ -77,6 +77,7 @@ fn help() -> String {
      \x20 --motor-eng <text>      inline RASP .eng motor text (curve + propellant)\n\
      \x20 --motor-file <path>     .eng file on disk (native CLI only)\n\
      \x20 --recover <cdA>         drogue Cd·A in m²; recovery drag on descent\n\
+     \x20                            (flat frame: uniform or vacuum gravity)\n\
      \x20 --recovery-after-s <t>  absolute-time gate for deployment [0=apogee]\n\
      \x20 --recover-main <cdA>    main parachute Cd·A (dual deployment)\n\
      \x20 --main-altitude-m <m>   swap to the main at or below this altitude\n\
@@ -98,7 +99,7 @@ fn help() -> String {
      \x20 --speed-mps <v>          initial speed along the launch axis [0]\n\
      \x20 --ground-altitude-m <m>  altitude above sea level of the ground and\n\
      \x20                            the weather station [0]; impact is y\n\
-     \x20                            reaching it\n\
+     \x20                            reaching it (central gravity: the sphere)\n\
      \x20 --position-m <x,y,z>     initial position [0,ground,0]. Flat frame\n\
      \x20                            (uniform or vacuum gravity): y is altitude\n\
      \x20                            above sea level, at or above the ground.\n\
@@ -124,7 +125,10 @@ fn help() -> String {
      \x20 --gravity <mode>         uniform [default], central, vacuum\n\
      \x20 --mu <m3/s2>             central-gravity parameter [Earth]\n\
      \x20 --center <x,y,z>         central-gravity center [0,0,0]\n\
-     \x20 --space-above-m <alt>    above this altitude use vacuum (or central)\n\
+     \x20 --radius-m <R>           central gravity: planet radius [6371000];\n\
+     \x20                            the ground is the sphere of radius\n\
+     \x20                            R + ground altitude about --center\n\
+     \x20 --space-above-m <alt>    above this altitude use vacuum (flat frame)\n\
      \n\
      ATMOSPHERE & AERO (feature 'ballistics', default)\n\
      \x20 --diameter-m <d>         body diameter; enables drag with --cd\n\
@@ -252,11 +256,17 @@ pub(crate) struct Options {
     pub(crate) lift_k: Option<Vec<(f64, f64)>>,
 }
 
+/// Earth's mean radius, the default `--radius-m` for central gravity.
+const EARTH_MEAN_RADIUS_M: f64 = 6_371_000.0;
+
 /// The ground a flight lands on.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Ground {
     /// Flat frame: the plane Y = `altitude_m`, altitude above sea level.
     Plane { altitude_m: f64 },
+    /// Central gravity: the sphere of `radius_m` (planet radius plus ground
+    /// altitude) about the gravity center.
+    Sphere { center_m: Vec3, radius_m: f64 },
 }
 
 impl Ground {
@@ -264,6 +274,7 @@ impl Ground {
     pub(crate) fn height_m(&self, position_m: Vec3) -> f64 {
         match *self {
             Self::Plane { altitude_m } => position_m.y - altitude_m,
+            Self::Sphere { center_m, radius_m } => (position_m - center_m).norm() - radius_m,
         }
     }
 
@@ -281,6 +292,7 @@ impl Ground {
             x: lerp(above.x, below.x),
             y: match *self {
                 Self::Plane { altitude_m } => altitude_m,
+                Self::Sphere { .. } => lerp(above.y, below.y),
             },
             z: lerp(above.z, below.z),
             speed: lerp(above.speed, below.speed),
@@ -464,6 +476,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     let mut gravity = GravityMode::Uniform;
     let mut mu = None;
     let mut center = Vec3::zeros();
+    let mut radius_m = None;
     let mut space_above_m = None;
     let mut stages = Vec::new();
     let mut motor_eng = None;
@@ -587,6 +600,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
             }
             "--mu" => mu = Some(parse_f64(&value(flag)?, flag)?),
             "--center" => center = parse_vec3(&value(flag)?, flag)?,
+            "--radius-m" => radius_m = Some(parse_f64(&value(flag)?, flag)?),
             "--space-above-m" => space_above_m = Some(parse_f64(&value(flag)?, flag)?),
             "--stage" => stages.push(parse_stage(&value(flag)?)?),
             "--motor-eng" => motor_eng = Some(value(flag)?),
@@ -773,16 +787,62 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
         let (lowest, highest) = crate::ballistics::ICAO_STATION_RANGE_M;
         format!("error: --ground-altitude-m must be between {lowest} and {highest} m (the troposphere)")
     })?;
+    if gravity == GravityMode::Central {
+        if recover.is_some() {
+            return Err(
+                "error: --recover needs the flat frame (uniform or vacuum gravity): \
+                 recovery applies flat gravity along -y and reads its air at y"
+                    .to_string(),
+            );
+        }
+        if space_above_m.is_some() {
+            return Err(
+                "error: --space-above-m does nothing with --gravity central, which applies \
+                 on both sides; use it with uniform gravity"
+                    .to_string(),
+            );
+        }
+    } else if radius_m.is_some() {
+        return Err("error: --radius-m needs --gravity central".to_string());
+    }
     let position_m = position_m.unwrap_or(Vec3::new(0.0, ground_altitude_m, 0.0));
-    let ground = Ground::Plane {
-        altitude_m: ground_altitude_m,
+    let ground = if gravity == GravityMode::Central {
+        let radius_m = radius_m.unwrap_or(EARTH_MEAN_RADIUS_M);
+        if !radius_m.is_finite() || radius_m + ground_altitude_m <= 0.0 {
+            return Err(
+                "error: --radius-m must be finite and the ground sphere's radius \
+                 (--radius-m + --ground-altitude-m) positive"
+                    .to_string(),
+            );
+        }
+        Ground::Sphere {
+            center_m: center,
+            radius_m: radius_m + ground_altitude_m,
+        }
+    } else {
+        Ground::Plane {
+            altitude_m: ground_altitude_m,
+        }
     };
-    if gravity != GravityMode::Central && ground.height_m(position_m) < 0.0 {
-        return Err(format!(
-            "error: the start (y = {} m) is below the ground at {ground_altitude_m} m; \
-             in the flat frame y is altitude above sea level (see --ground-altitude-m)",
-            position_m.y
-        ));
+    let height_m = ground.height_m(position_m);
+    match ground {
+        Ground::Plane { .. } if height_m < 0.0 => {
+            return Err(format!(
+                "error: the start (y = {} m) is below the ground at {ground_altitude_m} m; \
+                 in the flat frame y is altitude above sea level (see --ground-altitude-m)",
+                position_m.y
+            ));
+        }
+        // Beyond rounding: a part in 10^12 of the radius (micrometres for Earth).
+        Ground::Sphere { center_m, radius_m } if height_m < -1e-12 * radius_m => {
+            return Err(format!(
+                "error: the start is {:.3} m inside the ground, the sphere of radius {radius_m} m \
+                 (--radius-m + --ground-altitude-m) about --center {},{},{}. Put --center at \
+                 0,-R,0 to launch from 0,ground,0, or start at --position-m R + h from --center",
+                -height_m, center_m.x, center_m.y, center_m.z
+            ));
+        }
+        _ => {}
     }
 
     let opts = Options {
@@ -982,7 +1042,8 @@ fn fmt_err(e: Error) -> String {
 /// Assemble the rocket, environment and guidance chain, then integrate.
 /// Returns the sampled rows and the internal RK4 substep count.
 /// `stop_at_impact` ends the run at the first sample after t = 0 at or below the ground
-/// ([`Ground`]): the plane Y = `--ground-altitude-m`, Y being altitude above sea level.
+/// ([`Ground`]): the plane Y = `--ground-altitude-m`, Y being altitude above sea level, or
+/// under central gravity the sphere of radius `--radius-m` + that altitude about `--center`.
 pub(crate) fn run_trajectory(
     opts: &Options,
     stop_at_impact: bool,
@@ -1127,6 +1188,16 @@ pub(crate) fn run_trajectory(
         || lift_k.is_some()
         || opts.weathercock;
     #[cfg(feature = "ballistics")]
+    if opts.gravity == GravityMode::Central && (use_drag || wants_mpm) {
+        // Drag, spin, body lift and the weathercock read their air at raw Y,
+        // which under central gravity is not altitude.
+        return Err(
+            "error: central gravity and the drag adapter (drag, spin, body lift, weathercock) \
+             do not mix; use uniform gravity with --space-above-m for the atmosphere/space split"
+                .to_string(),
+        );
+    }
+    #[cfg(feature = "ballistics")]
     if wants_mpm && !use_drag {
         return Err(
             "error: spin, coriolis and tipoff act through the drag adapter; add --diameter-m and --cd"
@@ -1135,19 +1206,10 @@ pub(crate) fn run_trajectory(
     }
 
     let mut base = match opts.gravity {
-        GravityMode::Central => {
-            #[cfg(feature = "ballistics")]
-            if use_drag {
-                return Err(
-                    "error: central gravity and the drag adapter do not mix; use --space-above-m for the atmosphere/space split"
-                        .to_string(),
-                );
-            }
-            Forces::Central(match opts.mu {
-                Some(mu) => CentralGravity::new(mu, opts.center).map_err(fmt_err)?,
-                None => CentralGravity::earth(opts.center).map_err(fmt_err)?,
-            })
-        }
+        GravityMode::Central => Forces::Central(match opts.mu {
+            Some(mu) => CentralGravity::new(mu, opts.center).map_err(fmt_err)?,
+            None => CentralGravity::earth(opts.center).map_err(fmt_err)?,
+        }),
         GravityMode::Vacuum => Forces::Uniform(UniformGravity(Vec3::zeros())),
         GravityMode::Uniform => {
             #[cfg(feature = "ballistics")]
@@ -1219,13 +1281,8 @@ pub(crate) fn run_trajectory(
     };
 
     if let Some(cutoff) = opts.space_above_m {
-        let above: Forces = match opts.gravity {
-            GravityMode::Central => match opts.mu {
-                Some(mu) => Forces::Central(CentralGravity::new(mu, opts.center).map_err(fmt_err)?),
-                None => Forces::Central(CentralGravity::earth(opts.center).map_err(fmt_err)?),
-            },
-            _ => Forces::Uniform(UniformGravity(Vec3::zeros())),
-        };
+        // Flat frame only (parse refuses it with central gravity): vacuum above.
+        let above = Forces::Uniform(UniformGravity(Vec3::zeros()));
         base = Forces::Switched(
             AltitudeSwitch::new(
                 BoxedForces(Box::new(base)),
