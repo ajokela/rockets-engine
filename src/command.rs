@@ -146,9 +146,11 @@ fn help() -> String {
      \x20 --wind-zone <s:a:u:v>    downrange wind zone, repeatable:\n\
      \x20                            speed m/s, angle deg (0=headwind),\n\
      \x20                            until downrange m, vertical m/s\n\
-     \x20 --wind-profile <a:s:d,...> vertical wind profile: altitude m,\n\
-     \x20                            speed m/s, FROM-direction deg (0=headwind)\n\
-     \x20 --wind-sounding <path>   radiosonde file as the profile (native CLI)\n\
+     \x20 --wind-profile <a:s:d,...> vertical wind profile: altitude above\n\
+     \x20                            sea level m, speed m/s, FROM-direction\n\
+     \x20                            deg (0=headwind)\n\
+     \x20 --wind-sounding <path>   radiosonde file as the profile, heights\n\
+     \x20                            above sea level (native CLI)\n\
      \x20 --turbulence <sigma>     deterministic gust RMS per axis, m/s [0]\n\
      \x20 --turbulence-tau <s>     gust correlation period [2.0]\n\
      \x20 --atmo-zone <t:p:h:u>    atmosphere zone, repeatable: temp C,\n\
