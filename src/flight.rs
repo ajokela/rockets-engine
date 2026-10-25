@@ -108,8 +108,9 @@ pub const EARTH_MU_M3_S2: f64 = 3.986_004_418e14;
 /// which matters once trajectories span hundreds of kilometres or climb above
 /// the atmosphere. Positions are read in the caller's frame; place `center_m`
 /// at the attracting body's center (for an Earth-centered inertial coast, the
-/// origin). There is no atmosphere here: pair with an [`AltitudeSwitch`] or a
-/// custom model when drag still applies.
+/// origin). There is no atmosphere here: pair with an [`AltitudeSwitch`] (in
+/// a frame where Y is altitude; see its docs) or a custom model when drag
+/// still applies.
 #[derive(Debug, Clone, Copy)]
 pub struct CentralGravity {
     mu_m3_s2: f64,
@@ -158,13 +159,19 @@ impl ForceModel for CentralGravity {
     }
 }
 
-/// Routes to one of two force models depending on altitude (position Y).
+/// Routes to one of two force models by comparing raw position Y with a cutoff.
 ///
 /// Use it to bound a dense-atmosphere model: at and below the cutoff, forces
 /// come from e.g. `BallisticForces`; above it, from a vacuum model such as
-/// [`UniformGravity`] or [`CentralGravity`]. The Y coordinate follows the
-/// crate's world-frame convention; with the ballistics adapter it is absolute
-/// altitude above sea level.
+/// [`UniformGravity`] or [`CentralGravity`]. The switch reads Y, and
+/// `BallisticForces` reads Y as altitude above sea level, so it switches on
+/// altitude only in a frame where Y is altitude: the flat frame, or a local
+/// frame with a [`CentralGravity`] center at `(0, -R, 0)` (R the planet
+/// radius), where Y stays near altitude close to the launch point. In an
+/// Earth-centered frame (center at the origin; the `icbm_midcourse` example
+/// starts at Y = R + h) Y is measured from Earth's center, so neither the
+/// cutoff nor `BallisticForces` reads altitude; there, compare the radius
+/// yourself, as that example does for its reentry handoff.
 #[derive(Debug, Clone)]
 pub struct AltitudeSwitch<Below, Above> {
     below: Below,
@@ -174,8 +181,8 @@ pub struct AltitudeSwitch<Below, Above> {
 
 impl<Below, Above> AltitudeSwitch<Below, Above> {
     /// Switch from `below` to `above` at `cutoff_altitude_m` (inclusive below).
-    /// The cutoff is compared with position Y in the world frame, which is
-    /// altitude above sea level with `BallisticForces`.
+    /// The cutoff is compared with raw position Y, so it is an altitude only
+    /// in a frame where Y is altitude (see the type docs).
     pub fn new(below: Below, above: Above, cutoff_altitude_m: f64) -> Result<Self> {
         if !cutoff_altitude_m.is_finite() {
             return Err(Error::invalid("cutoff_altitude_m", "must be finite"));
@@ -194,8 +201,8 @@ impl<Below, Above> AltitudeSwitch<Below, Above> {
     pub fn above(&self) -> &Above {
         &self.above
     }
-    /// Handoff altitude in metres, compared with position Y in the world
-    /// frame (altitude above sea level with `BallisticForces`).
+    /// Handoff value in metres, compared with raw position Y: an altitude
+    /// only in a frame where Y is altitude (see the type docs).
     pub fn cutoff_altitude_m(&self) -> f64 {
         self.cutoff_altitude_m
     }

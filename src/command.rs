@@ -79,8 +79,8 @@ fn help() -> String {
      \x20 --recover <cdA>         drogue Cd·A in m²; recovery drag on descent\n\
      \x20 --recovery-after-s <t>  absolute-time gate for deployment [0=apogee]\n\
      \x20 --recover-main <cdA>    main parachute Cd·A (dual deployment)\n\
-     \x20 --main-altitude-m <m>   swap to the main below this altitude\n\
-     \x20                            above sea level [300]\n\
+     \x20 --main-altitude-m <m>   swap to the main at or below this y [300];\n\
+     \x20                            flat frame: altitude above sea level\n\
      \x20 --airframe <preset>     sport24 or hp54: diameter, Cd, Cnα, CP, CG,\n\
      \x20                            inertia and recovery Cd·A, illustrative only\n\
      \x20 --geometry <spec>       Barrowman modeler (subsonic + supersonic):\n\
@@ -135,11 +135,13 @@ fn help() -> String {
      \x20 --turbulence <sigma>     deterministic gust RMS per axis, m/s [0]\n\
      \x20 --turbulence-tau <s>     gust correlation period [2.0]\n\
      \x20 --atmo-zone <t:p:h:u>    atmosphere zone, repeatable: temp C,\n\
-     \x20                            pressure hPa, humidity %, until downrange m;\n\
-     \x20                            temp and pressure are the air at y = 0,\n\
-     \x20                            i.e. sea level, where the CLI's weather\n\
-     \x20                            station is: a high pad's station reading\n\
-     \x20                            here gets the altitude lapse twice\n\
+     \x20                            pressure hPa, humidity %, until downrange m.\n\
+     \x20                            Drag (and --twist-in spin) only: temp and\n\
+     \x20                            pressure are its air at y = 0. Recovery\n\
+     \x20                            drag, weathercock and body lift use\n\
+     \x20                            standard air. Don't combine a high pad's\n\
+     \x20                            station reading here with a raised pad\n\
+     \x20                            (--position-m): the lapse applies twice\n\
      \x20 --twist-in <in/turn>     effective spin twist; enables Magnus + yaw\n\
      \x20                            of repose (needs --body-length-m)\n\
      \x20 --body-length-m <m>       airframe length for the spin model\n\
@@ -905,8 +907,11 @@ fn fmt_err(e: Error) -> String {
 
 /// Assemble the rocket, environment and guidance chain, then integrate.
 /// Returns the sampled rows and the internal RK4 substep count.
-/// `stop_at_impact` ends the run at the first ground crossing (y reaching 0): Y is altitude
-/// above sea level, and the CLI's ground is sea level.
+/// `stop_at_impact` ends the run at the first sample after t = 0 on or below the Y = 0
+/// plane, in every gravity mode. In the flat frame (uniform or vacuum gravity) Y is
+/// altitude above sea level and the ground is sea level; with `--gravity central` and the
+/// center at `0,-R,0`, Y = 0 is the plane tangent to the planet at the launch point, not
+/// the planet's surface.
 pub(crate) fn run_trajectory(
     opts: &Options,
     stop_at_impact: bool,
