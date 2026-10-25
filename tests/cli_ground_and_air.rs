@@ -433,3 +433,88 @@ fn the_central_gravity_plot_is_height_above_the_ground_sphere() {
     let rows_with_samples = a[1..].iter().filter(|l| l.contains('*')).count();
     assert!(rows_with_samples > 10, "{a:#?}");
 }
+
+const WEATHERCOCK: &str =
+    "simulate --motor-eng 'Estes D12 24 70 0 0.01 0.03\\n0 0\\n0.05 20\\n0.1 20\\n0.2 8\\n1.8 9\\n1.94 0' \
+     --geometry nose=conical:0.1:0.024,tube=0.4:0.024,fins=3:0.05:0.03:0.04:0.02:0.002 \
+     --geometry-masses 0.012,0.020,0.006 --weathercock --wind 4,0,0 --duration-s 12 \
+     --dt-s 0.25 --format csv";
+
+/// Every CSV row as (t, x, y, z, speed).
+fn csv_columns(out: &str) -> Vec<[f64; 5]> {
+    out.lines()
+        .skip(1)
+        .map(|line| {
+            let mut cols = line.split(',').map(|c| c.parse::<f64>().unwrap());
+            std::array::from_fn(|_| cols.next().unwrap())
+        })
+        .collect()
+}
+
+#[test]
+fn atmosphere_zones_reach_the_weathercock() {
+    // A sea-level pad whose zone reads the standard air at 4000 m flies like
+    // a 4000 m pad in standard air, raised by 4000 m: drag and the
+    // weathercock both read the zone. A weathercock left on the sea-level
+    // station turns harder into the wind and climbs tens of metres less.
+    // (Upstream lapses in geopotential height, so the two lapses differ by
+    // a few millimetres.)
+    let rockets_engine::ballistics::Atmosphere::Standard {
+        temperature_c,
+        pressure_hpa,
+        ..
+    } = rockets_engine::ballistics::Atmosphere::icao_standard(4000.0).unwrap()
+    else {
+        unreachable!()
+    };
+    let zoned = csv_columns(
+        &sim(&format!(
+            "{WEATHERCOCK} --atmo-zone {temperature_c}:{pressure_hpa}:0:1000000"
+        ))
+        .unwrap(),
+    );
+    let high = csv_columns(&sim(&format!("{WEATHERCOCK} --ground-altitude-m 4000")).unwrap());
+    assert_eq!(zoned.len(), high.len());
+    let mut worst = 0.0_f64;
+    for (a, b) in zoned.iter().zip(&high) {
+        let shifted = [a[0], a[1], a[2] + 4000.0, a[3], a[4]];
+        for (u, v) in shifted.iter().zip(b) {
+            worst = worst.max((u - v).abs());
+        }
+    }
+    assert!(worst < 0.05, "zoned vs raised pad differ by up to {worst}");
+}
+
+#[test]
+fn solve_range_and_dispersion_land_on_the_sphere_in_either_frame() {
+    // Both stop each run at the ground. 100 km downrange the sphere is ~800 m
+    // below the launch tangent plane, so a launch-local run that stopped at
+    // Y = 0 would end before any sample reached the sphere; the
+    // Earth-centred frame, where Y never nears 0, is the reference.
+    let local = "--center 0,-6371000,0";
+    let centred = "--position-m 0,6371000,0";
+    let solve = ARC.replacen("simulate", "solve-range 100000", 1);
+    let a = sim(&format!("{solve} {local}")).unwrap();
+    let b = sim(&format!("{solve} {centred}")).unwrap();
+    assert_eq!(
+        line_starting(&a, "elevation_deg:"),
+        line_starting(&b, "elevation_deg:"),
+        "launch-local:\n{a}\nEarth-centred:\n{b}"
+    );
+    let spread = ARC.replacen("simulate", "dispersion --runs 4", 1);
+    let a = sim(&format!("{spread} {local}")).unwrap();
+    let b = sim(&format!("{spread} {centred}")).unwrap();
+    let mean_range = |out: &str| -> f64 {
+        line_starting(out, "range_m:")
+            .split_whitespace()
+            .nth(2)
+            .unwrap()
+            .trim_end_matches(',')
+            .parse()
+            .unwrap()
+    };
+    assert!(
+        (mean_range(&a) - mean_range(&b)).abs() < 0.05,
+        "launch-local:\n{a}\nEarth-centred:\n{b}"
+    );
+}
