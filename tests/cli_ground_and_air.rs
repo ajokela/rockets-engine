@@ -373,3 +373,40 @@ fn the_planet_radius_must_be_positive() {
         assert!(err.contains("--radius-m must be"), "{radius}: {err}");
     }
 }
+
+/// The rows of the ASCII chart, title first.
+fn chart(out: &str) -> Vec<&str> {
+    out.lines()
+        .skip_while(|l| !l.contains(" (peak "))
+        .take_while(|l| !l.starts_with('+'))
+        .collect()
+}
+
+#[test]
+fn the_central_gravity_plot_is_height_above_the_ground_sphere() {
+    // Earth-centred, Y is distance from the planet's center: the chart plots
+    // height above the ground sphere instead, the same chart as the
+    // launch-local frame draws.
+    let centred = sim(&format!(
+        "{ARC} --position-m 0,6372500,0 --ground-altitude-m 1500 --plot"
+    ))
+    .unwrap();
+    let local = sim(&format!(
+        "{ARC} --center 0,-6371000,0 --ground-altitude-m 1500 --plot"
+    ))
+    .unwrap();
+    let (a, b) = (chart(&centred), chart(&local));
+    assert!(
+        a[0].starts_with("height_m above the ground (peak "),
+        "{}",
+        a[0]
+    );
+    assert_eq!(a, b);
+    // The arc fills the chart: launch on the floor row, apogee on the top.
+    assert!(
+        a[1].contains('*') && a[a.len() - 1].starts_with("|*"),
+        "{a:#?}"
+    );
+    let rows_with_samples = a[1..].iter().filter(|l| l.contains('*')).count();
+    assert!(rows_with_samples > 10, "{a:#?}");
+}

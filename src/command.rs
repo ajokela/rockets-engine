@@ -188,8 +188,6 @@ pub(crate) struct Options {
     pub(crate) speed_mps: f64,
     /// Start position: `--position-m`, or the pad at `(0, ground, 0)`.
     pub(crate) position_m: Vec3,
-    /// Altitude above sea level of the ground and of the weather station.
-    pub(crate) ground_altitude_m: f64,
     /// The surface impact is measured against.
     pub(crate) ground: Ground,
     pub(crate) format: Format,
@@ -868,7 +866,6 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
         azimuth_deg,
         speed_mps,
         position_m,
-        ground_altitude_m,
         ground,
         format,
         plot,
@@ -1480,7 +1477,7 @@ fn render(rows: &[Row], opts: &Options, substeps: usize) -> String {
     }
     if opts.plot {
         out.push('\n');
-        out.push_str(&render_plot(rows, opts.ground_altitude_m));
+        out.push_str(&render_plot(rows, &opts.ground));
     }
     out
 }
@@ -1535,24 +1532,38 @@ fn render_json(rows: &[Row]) -> String {
     out
 }
 
-/// ASCII altitude chart whose floor is the ground altitude.
-fn render_plot(rows: &[Row], ground_m: f64) -> String {
+/// ASCII altitude chart whose floor is the ground: in the flat frame, altitude
+/// above sea level over the ground plane; under central gravity, the height
+/// above the ground sphere, since Y there is not altitude (in an Earth-centred
+/// frame it is the distance from the planet's center).
+fn render_plot(rows: &[Row], ground: &Ground) -> String {
     const HEIGHT: usize = 18;
     const WIDTH: usize = 72;
-    let peak = rows.iter().map(|r| r.y).fold(ground_m, f64::max);
-    if peak <= ground_m {
+    let (values, floor_m): (Vec<f64>, f64) = match *ground {
+        Ground::Plane { altitude_m } => (rows.iter().map(|r| r.y).collect(), altitude_m),
+        Ground::Sphere { .. } => (
+            rows.iter()
+                .map(|r| ground.height_m(Vec3::new(r.x, r.y, r.z)))
+                .collect(),
+            0.0,
+        ),
+    };
+    let peak = values.iter().copied().fold(floor_m, f64::max);
+    if peak <= floor_m {
         return "altitude never leaves the pad\n".to_string();
     }
     let mut grid = vec![vec![b' '; WIDTH]; HEIGHT];
-    for (i, r) in rows.iter().enumerate() {
-        let col = i * (WIDTH - 1) / rows.len().max(1);
-        let row = (((r.y - ground_m) / (peak - ground_m)) * (HEIGHT - 1) as f64).round() as usize;
+    for (i, value) in values.iter().enumerate() {
+        let col = i * (WIDTH - 1) / values.len().max(1);
+        let row = (((value - floor_m) / (peak - floor_m)) * (HEIGHT - 1) as f64).round() as usize;
         grid[HEIGHT - 1 - row][col] = b'*';
     }
-    let mut out = if ground_m == 0.0 {
-        format!("altitude_m (peak {peak:.1})\n")
-    } else {
-        format!("altitude_m (peak {peak:.1}, ground {ground_m:.1})\n")
+    let mut out = match *ground {
+        Ground::Plane { altitude_m: 0.0 } => format!("altitude_m (peak {peak:.1})\n"),
+        Ground::Plane { altitude_m } => {
+            format!("altitude_m (peak {peak:.1}, ground {altitude_m:.1})\n")
+        }
+        Ground::Sphere { .. } => format!("height_m above the ground (peak {peak:.1})\n"),
     };
     for line in &grid {
         out.push('|');
