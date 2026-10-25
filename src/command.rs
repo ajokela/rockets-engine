@@ -135,13 +135,11 @@ fn help() -> String {
      \x20 --turbulence <sigma>     deterministic gust RMS per axis, m/s [0]\n\
      \x20 --turbulence-tau <s>     gust correlation period [2.0]\n\
      \x20 --atmo-zone <t:p:h:u>    atmosphere zone, repeatable: temp C,\n\
-     \x20                            pressure hPa, humidity %, until downrange m.\n\
-     \x20                            Drag (and --twist-in spin) only: temp and\n\
-     \x20                            pressure are its air at y = 0. Recovery\n\
-     \x20                            drag, weathercock and body lift use\n\
-     \x20                            standard air. Don't combine a high pad's\n\
-     \x20                            station reading here with a raised pad\n\
-     \x20                            (--position-m): the lapse applies twice\n\
+     \x20                            pressure hPa, humidity %, until downrange m;\n\
+     \x20                            every force reads it. Temp and pressure are\n\
+     \x20                            its air at y = 0. Don't combine a high\n\
+     \x20                            pad's station reading here with a raised\n\
+     \x20                            pad (--position-m): the lapse applies twice\n\
      \x20 --twist-in <in/turn>     effective spin twist; enables Magnus + yaw\n\
      \x20                            of repose (needs --body-length-m)\n\
      \x20 --body-length-m <m>       airframe length for the spin model\n\
@@ -1187,6 +1185,11 @@ pub(crate) fn run_trajectory(
                 .with_main(main_cd_area, altitude_m)
                 .map_err(fmt_err)?;
         }
+        if !opts.atmo_zones.is_empty() {
+            recovery = recovery
+                .with_atmosphere_zones(opts.atmo_zones.clone())
+                .map_err(fmt_err)?;
+        }
         if let Some((sigma, tau)) = opts.turbulence {
             recovery = recovery
                 .with_turbulence(sigma, tau, opts.turbulence_seed)
@@ -1230,6 +1233,11 @@ pub(crate) fn run_trajectory(
             opts.wind_mps,
         )
         .map_err(fmt_err)?;
+        if !opts.atmo_zones.is_empty() {
+            weathercock = weathercock
+                .with_atmosphere_zones(opts.atmo_zones.clone())
+                .map_err(fmt_err)?;
+        }
         if let Some((sigma, tau)) = opts.turbulence {
             weathercock = weathercock
                 .with_turbulence(sigma, tau, opts.turbulence_seed)

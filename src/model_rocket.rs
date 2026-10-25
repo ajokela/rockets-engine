@@ -124,7 +124,7 @@ pub use recovery::{Airframe, RecoveryForces};
 #[cfg(feature = "ballistics")]
 mod recovery {
     use crate::{
-        ballistics::{local_air, Atmosphere, BallisticForces},
+        ballistics::{Air, Atmosphere, BallisticForces},
         FlightState, ForceModel, Result, Vec3, WeathercockParams,
     };
 
@@ -140,8 +140,7 @@ mod recovery {
     #[derive(Debug, Clone)]
     pub struct RecoveryForces<F> {
         inner: F,
-        atmosphere: Atmosphere,
-        atmos_params: (f64, f64, f64, f64),
+        air: Air,
         wind_mps: Vec3,
         wind_sock: Option<ballistics_engine::wind::WindSock>,
         turbulence: Option<crate::ballistics::Turbulence>,
@@ -154,7 +153,9 @@ mod recovery {
         /// `recovery_cd_area_m2` is the parachute's Cd·A product in m².
         /// `deploy_after_s` is an absolute simulation-time gate: deployment
         /// happens on the first descending state at or after it (0 = at
-        /// apogee). `wind_mps` should match the inner model's uniform wind.
+        /// apogee). `atmosphere` and `wind_mps` should match the inner model's
+        /// air; pass its atmosphere zones too, through
+        /// [`Self::with_atmosphere_zones`].
         pub fn new(
             inner: F,
             recovery_cd_area_m2: f64,
@@ -176,8 +177,7 @@ mod recovery {
             }
             Ok(Self {
                 inner,
-                atmos_params: atmosphere.parameters()?,
-                atmosphere,
+                air: Air::new(atmosphere)?,
                 wind_mps,
                 wind_sock: None,
                 turbulence: None,
@@ -204,6 +204,16 @@ mod recovery {
                 return Err(crate::Error::invalid("main_altitude_m", "must be finite"));
             }
             self.main = Some((cd_area_m2, altitude_m));
+            Ok(self)
+        }
+
+        /// Read the same station-referenced atmosphere zones as the inner
+        /// model (see [`BallisticForces::with_atmosphere_zones`]): with the
+        /// same ladder, recovery drag uses the drag kernel's air at every
+        /// position. The atmosphere passed to [`Self::new`] must be
+        /// `Standard`.
+        pub fn with_atmosphere_zones(mut self, zones: Vec<(f64, f64, f64, f64)>) -> Result<Self> {
+            self.air = self.air.with_zones(zones)?;
             Ok(self)
         }
 
@@ -260,7 +270,7 @@ mod recovery {
             if speed < 1e-12 {
                 return g;
             }
-            let (rho, _) = local_air(self.atmosphere, self.atmos_params, state.position_m.y);
+            let (rho, _) = self.air.at(state.position_m);
             let q = 0.5 * rho * speed * speed;
             g - v_air * (q * self.cd_area(state) / (speed * mass_kg))
         }

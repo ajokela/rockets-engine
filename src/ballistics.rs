@@ -9,7 +9,7 @@
 
 use crate::{finite_vec, positive, Error, FlightState, ForceModel, Result, Vec3};
 use ballistics_engine::{
-    atmosphere::{calculate_air_density_cimp, AtmoSock},
+    atmosphere::{calculate_air_density_cimp, get_local_atmosphere, AtmoSock},
     constants::GRAINS_TO_KG,
     derivatives::compute_derivatives,
     drag::DragTable,
@@ -98,8 +98,8 @@ impl Atmosphere {
 }
 
 /// Local air density (kg/m³) and sound speed (m/s) for an atmosphere and its
-/// kernel parameter tuple, shared with the reduced-order dynamics models.
-pub(crate) fn local_air(
+/// kernel parameter tuple, at a geometric altitude above sea level.
+fn local_air(
     atmosphere: Atmosphere,
     atmos_params: (f64, f64, f64, f64),
     altitude_m: f64,
@@ -107,13 +107,102 @@ pub(crate) fn local_air(
     match atmosphere {
         Atmosphere::Standard { .. } => {
             let (base_alt, temp_c, press_hpa, ratio) = atmos_params;
-            ballistics_engine::atmosphere::get_local_atmosphere(
-                altitude_m, base_alt, temp_c, press_hpa, ratio,
-            )
+            get_local_atmosphere(altitude_m, base_alt, temp_c, press_hpa, ratio)
         }
         Atmosphere::Uniform { .. } => {
             let (density, speed_of_sound, _, _) = atmos_params;
             (density, speed_of_sound)
+        }
+    }
+}
+
+/// One atmosphere and its optional downrange zones: the air-at-position lookup
+/// every force reads, so drag, body lift, recovery drag and the weathercock all
+/// see the same air.
+///
+/// [`Air::at`] reproduces the upstream 0.48.0 `compute_derivatives` lookup that
+/// the drag kernel runs on the same atmosphere tuple and zone ladder.
+#[derive(Debug, Clone)]
+pub(crate) struct Air {
+    atmosphere: Atmosphere,
+    params: (f64, f64, f64, f64),
+    zones: Option<AtmoSock>,
+}
+
+impl Air {
+    pub(crate) fn new(atmosphere: Atmosphere) -> Result<Self> {
+        Ok(Self {
+            params: atmosphere.parameters()?,
+            atmosphere,
+            zones: None,
+        })
+    }
+
+    /// Attach station-referenced zones, each `(temperature_c, pressure_hpa,
+    /// humidity_percent, until_downrange_m)`; see
+    /// [`BallisticForces::with_atmosphere_zones`] for the contract.
+    pub(crate) fn with_zones(mut self, zones: Vec<(f64, f64, f64, f64)>) -> Result<Self> {
+        if !matches!(self.atmosphere, Atmosphere::Standard { .. }) {
+            return Err(Error::invalid(
+                "atmosphere zones",
+                "require the Standard atmosphere, not Uniform",
+            ));
+        }
+        if zones.is_empty() {
+            return Err(Error::invalid(
+                "atmosphere zones",
+                "needs at least one zone",
+            ));
+        }
+        for (temp_c, pressure_hpa, humidity, until_m) in &zones {
+            if !temp_c.is_finite()
+                || !pressure_hpa.is_finite()
+                || *pressure_hpa <= 0.0
+                || !humidity.is_finite()
+                || !(0.0..=100.0).contains(humidity)
+                || !until_m.is_finite()
+                || *until_m <= 0.0
+            {
+                return Err(Error::invalid(
+                    "atmosphere zone",
+                    "needs finite temperature, positive pressure, humidity in [0, 100] and positive until_m",
+                ));
+            }
+        }
+        self.zones = Some(AtmoSock::new(zones));
+        Ok(self)
+    }
+
+    /// The kernel's atmosphere tuple.
+    pub(crate) fn params(&self) -> (f64, f64, f64, f64) {
+        self.params
+    }
+
+    /// The zone ladder handed to the kernel, if any.
+    pub(crate) fn zones(&self) -> Option<&AtmoSock> {
+        self.zones.as_ref()
+    }
+
+    /// Air density (kg/m³) and sound speed (m/s) at a world position, with Y
+    /// the altitude above sea level and X the downrange distance.
+    ///
+    /// As upstream does: a `Uniform` atmosphere returns its constants. A
+    /// `Standard` one lapses its station reading from the station altitude to
+    /// Y; with zones, the zone selected by X (`AtmoSock::atmo_for_range`)
+    /// replaces the station temperature and pressure, and its density ratio
+    /// (CIPM density at the zone's temperature, pressure and humidity, over
+    /// 1.225) replaces the station's, before that same lapse. Density matches
+    /// the kernel's bit for bit. Sound speed is `get_local_atmosphere`'s
+    /// dry-air value, as these forces have always used; the kernel's own
+    /// moist formula at zero humidity agrees with it to about 4e-7.
+    pub(crate) fn at(&self, position_m: Vec3) -> (f64, f64) {
+        match (self.atmosphere, &self.zones) {
+            (Atmosphere::Standard { .. }, Some(sock)) => {
+                let (temp_c, pressure_hpa, humidity) = sock.atmo_for_range(position_m.x);
+                let ratio = calculate_air_density_cimp(temp_c, pressure_hpa, humidity) / 1.225;
+                get_local_atmosphere(position_m.y, self.params.0, temp_c, pressure_hpa, ratio)
+            }
+            _ => local_air(self.atmosphere, self.params, position_m.y),
         }
     }
 }
@@ -146,13 +235,11 @@ pub(crate) fn mach_table(pairs: Vec<(f64, f64)>, name: &'static str) -> Result<D
 #[derive(Debug, Clone)]
 pub struct BallisticForces {
     inputs: BallisticInputs,
-    atmos_params: (f64, f64, f64, f64),
-    atmosphere: Atmosphere,
+    air: Air,
     wind_mps: Vec3,
     turbulence: Option<Turbulence>,
     omega_rps: Option<Vec3>,
     body_lift: Option<BodyLift>,
-    atmo_sock: Option<AtmoSock>,
     wind_sock: Option<WindSock>,
 }
 
@@ -275,13 +362,11 @@ impl BallisticForces {
         };
         Ok(Self {
             inputs,
-            atmos_params: atmosphere.parameters()?,
-            atmosphere,
+            air: Air::new(atmosphere)?,
             wind_mps,
             turbulence: None,
             omega_rps: None,
             body_lift: None,
-            atmo_sock: None,
             wind_sock: None,
         })
     }
@@ -415,38 +500,16 @@ impl BallisticForces {
 
     /// Downrange-segmented atmosphere (upstream `AtmoSock`): station-referenced
     /// zones, each `(temperature_c, pressure_hpa, humidity_percent, until_downrange_m)`.
-    /// The zone is selected by downrange distance `position.x`; the base atmosphere
+    /// Each zone is a reading taken at the station altitude: the zone selected
+    /// by downrange distance `position.x` replaces the station reading, and the
+    /// lapse from the station altitude to Y applies on top. The base atmosphere
     /// must be [`Atmosphere::Standard`], and each zone's humidity applies to its
     /// station density while this derivative path uses dry-air sound speed.
+    /// Drag, spin and body lift all read the zoned air; give
+    /// [`crate::RecoveryForces`] and [`crate::Weathercock`] the same ladder
+    /// through their own `with_atmosphere_zones`.
     pub fn with_atmosphere_zones(mut self, zones: Vec<(f64, f64, f64, f64)>) -> Result<Self> {
-        if !matches!(self.atmosphere, Atmosphere::Standard { .. }) {
-            return Err(Error::invalid(
-                "atmosphere zones",
-                "require the Standard atmosphere, not Uniform",
-            ));
-        }
-        if zones.is_empty() {
-            return Err(Error::invalid(
-                "atmosphere zones",
-                "needs at least one zone",
-            ));
-        }
-        for (temp_c, pressure_hpa, humidity, until_m) in &zones {
-            if !temp_c.is_finite()
-                || !pressure_hpa.is_finite()
-                || *pressure_hpa <= 0.0
-                || !humidity.is_finite()
-                || !(0.0..=100.0).contains(humidity)
-                || !until_m.is_finite()
-                || *until_m <= 0.0
-            {
-                return Err(Error::invalid(
-                    "atmosphere zone",
-                    "needs finite temperature, positive pressure, humidity in [0, 100] and positive until_m",
-                ));
-            }
-        }
-        self.atmo_sock = Some(AtmoSock::new(zones));
+        self.air = self.air.with_zones(zones)?;
         Ok(self)
     }
 
@@ -502,12 +565,6 @@ impl BallisticForces {
         }
     }
 
-    /// Local air density (kg/m³) and sound speed (m/s) at a geometric altitude,
-    /// consistent with the atmosphere handed to the kernel.
-    fn local_air(&self, altitude_m: f64) -> (f64, f64) {
-        local_air(self.atmosphere, self.atmos_params, altitude_m)
-    }
-
     /// Quasi-static AoA force increment: normal force toward the body-axis side of
     /// the velocity, plus induced drag along it. Zero when aligned or in still air.
     fn body_lift_accel(
@@ -536,7 +593,7 @@ impl BallisticForces {
         if alpha < 1e-12 {
             return Ok(Vec3::zeros());
         }
-        let (rho, sound) = self.local_air(state.position_m.y);
+        let (rho, sound) = self.air.at(state.position_m);
         if rho <= 0.0 || sound <= 0.0 {
             return Ok(Vec3::zeros());
         }
@@ -588,11 +645,11 @@ impl BallisticForces {
             state.velocity_mps,
             &inputs,
             wind_mps,
-            self.atmos_params,
+            self.air.params(),
             inputs.bc_value,
             self.omega_rps,
             state.time_s,
-            self.atmo_sock.as_ref(),
+            self.air.zones(),
         );
         let acceleration = Vec3::new(derivatives[3], derivatives[4], derivatives[5]);
         if !finite_vec(&acceleration) {
@@ -660,6 +717,106 @@ mod tests {
         assert!(Turbulence::new(-1.0, 2.0, 0).is_err());
         assert!(Turbulence::new(1.0, 0.0, 0).is_err());
         assert!(Turbulence::new(f64::NAN, 2.0, 0).is_err());
+    }
+
+    fn pad_station() -> Atmosphere {
+        Atmosphere::Standard {
+            station_altitude_m: 1500.0,
+            temperature_c: 5.25,
+            pressure_hpa: 845.6,
+            humidity_percent: 30.0,
+        }
+    }
+
+    const POSITIONS: [(f64, f64); 6] = [
+        (0.0, 0.0),
+        (50.0, 1500.0),
+        (99.0, 1800.0),
+        (500.0, 4000.0),
+        (5_000.0, 12_000.0),
+        (50_000.0, -200.0),
+    ];
+
+    #[test]
+    fn air_without_zones_is_the_station_lapse() {
+        // Byte-identical to what recovery, the weathercock and body lift read
+        // before the shared lookup: get_local_atmosphere from the station.
+        for atmosphere in [Atmosphere::default(), pad_station()] {
+            let (base_alt, temp_c, press_hpa, ratio) = atmosphere.parameters().unwrap();
+            let air = Air::new(atmosphere).unwrap();
+            for (x, y) in POSITIONS {
+                assert_eq!(
+                    air.at(Vec3::new(x, y, 7.0)),
+                    get_local_atmosphere(y, base_alt, temp_c, press_hpa, ratio)
+                );
+            }
+        }
+        let uniform = Air::new(Atmosphere::Uniform {
+            density_kg_m3: 0.9,
+            speed_of_sound_mps: 330.0,
+        })
+        .unwrap();
+        assert_eq!(uniform.at(Vec3::new(10.0, 9000.0, 0.0)), (0.9, 330.0));
+    }
+
+    #[test]
+    fn a_zone_reading_replaces_the_station_reading() {
+        // A zone carrying a reading reads exactly like a station with that
+        // reading at the same altitude, and the zone is chosen by X.
+        let low = Atmosphere::Standard {
+            station_altitude_m: 1500.0,
+            temperature_c: -5.0,
+            pressure_hpa: 700.0,
+            humidity_percent: 50.0,
+        };
+        let zoned = Air::new(pad_station())
+            .unwrap()
+            .with_zones(vec![(5.25, 845.6, 30.0, 100.0), (-5.0, 700.0, 50.0, 1e6)])
+            .unwrap();
+        let near = Air::new(pad_station()).unwrap();
+        let far = Air::new(low).unwrap();
+        for (x, y) in POSITIONS {
+            let p = Vec3::new(x, y, 0.0);
+            let expected = if x < 100.0 { near.at(p) } else { far.at(p) };
+            assert_eq!(zoned.at(p), expected, "at x {x}, y {y}");
+        }
+    }
+
+    #[test]
+    fn air_density_is_the_drag_kernels_density() {
+        // With a Mach-independent Cd the kernel's drag depends on the air only
+        // through its density, so the zoned kernel must match a kernel handed
+        // the lookup's density directly, at every position and zone.
+        let cd = vec![(0.0, 0.4), (5.0, 0.4)];
+        let zones = vec![(5.25, 845.6, 30.0, 100.0), (-5.0, 700.0, 50.0, 1e6)];
+        let zoned = BallisticForces::new(0.05, cd.clone(), pad_station(), Vec3::zeros())
+            .unwrap()
+            .with_atmosphere_zones(zones.clone())
+            .unwrap();
+        let air = Air::new(pad_station()).unwrap().with_zones(zones).unwrap();
+        for (x, y) in POSITIONS {
+            let state = FlightState {
+                time_s: 0.0,
+                position_m: Vec3::new(x, y, 0.0),
+                velocity_mps: Vec3::new(150.0, 40.0, 0.0),
+            };
+            let (density_kg_m3, speed_of_sound_mps) = air.at(state.position_m);
+            let direct = BallisticForces::new(
+                0.05,
+                cd.clone(),
+                Atmosphere::Uniform {
+                    density_kg_m3,
+                    speed_of_sound_mps,
+                },
+                Vec3::zeros(),
+            )
+            .unwrap();
+            assert_eq!(
+                zoned.acceleration_in_wind(&state, 0.3, Vec3::zeros()),
+                direct.acceleration_in_wind(&state, 0.3, Vec3::zeros()),
+                "at x {x}, y {y}"
+            );
+        }
     }
 
     #[test]
