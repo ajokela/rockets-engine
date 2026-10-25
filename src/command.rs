@@ -103,9 +103,8 @@ fn help() -> String {
      \x20 --position-m <x,y,z>     initial position [0,ground,0]. Flat frame\n\
      \x20                            (uniform or vacuum gravity): y is altitude\n\
      \x20                            above sea level, at or above the ground.\n\
-     \x20                            With --gravity central it is in --center's\n\
-     \x20                            frame; a center at 0,-R,0 (R = planet\n\
-     \x20                            radius) keeps y near altitude at the pad\n\
+     \x20                            Central gravity: in --center's frame, at\n\
+     \x20                            or outside the ground sphere\n\
      \x20 --prograde              thrust follows velocity (gravity turn)\n\
      \x20 --weathercock           second-order body-axis dynamics toward the\n\
      \x20                            relative wind (needs --cna, --cp, --cg-dry-m,\n\
@@ -127,7 +126,8 @@ fn help() -> String {
      \x20 --center <x,y,z>         central-gravity center [0,0,0]\n\
      \x20 --radius-m <R>           central gravity: planet radius [6371000];\n\
      \x20                            the ground is the sphere of radius\n\
-     \x20                            R + ground altitude about --center\n\
+     \x20                            R + ground altitude about --center, so\n\
+     \x20                            --center 0,-R,0 launches from the pad\n\
      \x20 --space-above-m <alt>    above this altitude use vacuum (flat frame)\n\
      \n\
      ATMOSPHERE & AERO (feature 'ballistics', default)\n\
