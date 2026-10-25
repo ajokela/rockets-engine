@@ -149,11 +149,28 @@ pub struct BallisticForces {
     atmos_params: (f64, f64, f64, f64),
     atmosphere: Atmosphere,
     wind_mps: Vec3,
+    /// An arbitrary wind field (winds-engine), sampled per state; overrides
+    /// the uniform vector and any zone ladder.
+    wind_field: Option<SharedWindField>,
     turbulence: Option<Turbulence>,
     omega_rps: Option<Vec3>,
     body_lift: Option<BodyLift>,
     atmo_sock: Option<AtmoSock>,
     wind_sock: Option<WindSock>,
+}
+
+/// A winds-engine field shared (Arc) between the force model, the
+/// weathercock and the recovery descent, with `Debug` and `Clone` so the
+/// containing models keep their derives.
+#[derive(Clone)]
+pub(crate) struct SharedWindField(
+    pub(crate) std::sync::Arc<dyn winds_engine::WindField + Send + Sync>,
+);
+
+impl std::fmt::Debug for SharedWindField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SharedWindField(..)")
+    }
 }
 
 /// Number of sinusoid components per axis in the turbulence gust model.
@@ -278,6 +295,7 @@ impl BallisticForces {
             atmos_params: atmosphere.parameters()?,
             atmosphere,
             wind_mps,
+            wind_field: None,
             turbulence: None,
             omega_rps: None,
             body_lift: None,
@@ -489,12 +507,34 @@ impl BallisticForces {
         Ok(self)
     }
 
-    /// Wind at a stage: segmented downrange wind if configured, else the
-    /// uniform vector; plus frozen-field turbulence if configured.
+    /// Sample an arbitrary winds-engine field instead of the uniform vector
+    /// or zone ladder. Shared as an `Arc` so the weathercock and the
+    /// recovery descent can sample the same air. Stateless and
+    /// deterministic, so integration stays reproducible.
+    pub fn with_wind_field(
+        mut self,
+        field: std::sync::Arc<dyn winds_engine::WindField + Send + Sync>,
+    ) -> Result<Self> {
+        self.wind_field = Some(SharedWindField(field));
+        Ok(self)
+    }
+
+    /// Wind at a stage: the configured field if any, else segmented
+    /// downrange wind if configured, else the uniform vector; plus
+    /// frozen-field turbulence if configured.
     fn effective_wind(&self, state: &FlightState) -> Vec3 {
-        let base = match &self.wind_sock {
-            Some(sock) => sock.vector_for_range_stateless(state.position_m.x),
-            None => self.wind_mps,
+        let base = match &self.wind_field {
+            Some(field) => {
+                let w = field.0.wind(
+                    state.time_s,
+                    [state.position_m.x, state.position_m.y, state.position_m.z],
+                );
+                Vec3::new(w.x_mps, w.y_mps, w.z_mps)
+            }
+            None => match &self.wind_sock {
+                Some(sock) => sock.vector_for_range_stateless(state.position_m.x),
+                None => self.wind_mps,
+            },
         };
         match &self.turbulence {
             Some(t) => base + t.gust_vec(state.time_s),
@@ -660,6 +700,41 @@ mod tests {
         assert!(Turbulence::new(-1.0, 2.0, 0).is_err());
         assert!(Turbulence::new(1.0, 0.0, 0).is_err());
         assert!(Turbulence::new(f64::NAN, 2.0, 0).is_err());
+    }
+
+    #[test]
+    fn wind_field_is_sampled_per_state() {
+        let profile = winds_engine::ProfileField::new(vec![
+            winds_engine::ProfileLevel {
+                altitude_m: 0.0,
+                speed_mps: 0.0,
+                direction_from_deg: 0.0,
+            },
+            winds_engine::ProfileLevel {
+                altitude_m: 1000.0,
+                speed_mps: 10.0,
+                direction_from_deg: 0.0,
+            },
+        ])
+        .unwrap();
+        let forces = BallisticForces::new(
+            0.05,
+            vec![(0.0, 0.4), (3.0, 0.4)],
+            Atmosphere::default(),
+            Vec3::zeros(),
+        )
+        .unwrap()
+        .with_wind_field(std::sync::Arc::new(profile))
+        .unwrap();
+        let state = FlightState {
+            time_s: 1.0,
+            position_m: Vec3::new(0.0, 500.0, 0.0),
+            velocity_mps: Vec3::zeros(),
+        };
+        // FROM 0° blows toward −X; 5 m/s at 500 m altitude.
+        let wind = forces.effective_wind(&state);
+        assert!((wind.x + 5.0).abs() < 1e-9, "wind {wind:?}");
+        assert!(wind.y.abs() < 1e-12 && wind.z.abs() < 1e-9);
     }
 
     #[test]

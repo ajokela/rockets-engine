@@ -504,13 +504,14 @@ checksum = "60a357793950651c4ed0f3f52338f53b2f809f32d83a07f72909fa13e4c6c1e3"
 
 [[package]]
 name = "rockets-engine"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "ballistics-engine",
  "nalgebra",
  "serde",
  "serde_json",
  "wasm-bindgen",
+ "winds-engine",
 ]
 
 [[package]]
@@ -771,6 +772,12 @@ checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
 ]
+
+[[package]]
+name = "winds-engine"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2a6e00934db1ffdb8e2c72d5042a874df1adb1bff09099a7ecede8eae977ce5"
 
 [[package]]
 name = "zip"

@@ -363,6 +363,7 @@ mod recovery {
         atmos_params: (f64, f64, f64, f64),
         wind_mps: Vec3,
         wind_sock: Option<ballistics_engine::wind::WindSock>,
+        wind_field: Option<crate::ballistics::SharedWindField>,
         turbulence: Option<crate::ballistics::Turbulence>,
         recovery_cd_area_m2: f64,
         deploy_after_s: f64,
@@ -399,6 +400,7 @@ mod recovery {
                 atmosphere,
                 wind_mps,
                 wind_sock: None,
+                wind_field: None,
                 turbulence: None,
                 recovery_cd_area_m2,
                 deploy_after_s,
@@ -459,10 +461,28 @@ mod recovery {
             Ok(self)
         }
 
+        /// Sample the same winds-engine field as the force model.
+        pub fn with_wind_field(
+            mut self,
+            field: std::sync::Arc<dyn winds_engine::WindField + Send + Sync>,
+        ) -> Result<Self> {
+            self.wind_field = Some(crate::ballistics::SharedWindField(field));
+            Ok(self)
+        }
+
         fn effective_wind(&self, state: &FlightState) -> Vec3 {
-            let base = match &self.wind_sock {
-                Some(sock) => sock.vector_for_range_stateless(state.position_m.x),
-                None => self.wind_mps,
+            let base = match &self.wind_field {
+                Some(field) => {
+                    let w = field.0.wind(
+                        state.time_s,
+                        [state.position_m.x, state.position_m.y, state.position_m.z],
+                    );
+                    Vec3::new(w.x_mps, w.y_mps, w.z_mps)
+                }
+                None => match &self.wind_sock {
+                    Some(sock) => sock.vector_for_range_stateless(state.position_m.x),
+                    None => self.wind_mps,
+                },
             };
             match &self.turbulence {
                 Some(t) => base + t.gust_vec(state.time_s),

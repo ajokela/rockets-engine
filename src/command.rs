@@ -131,6 +131,9 @@ fn help() -> String {
      \x20 --wind-zone <s:a:u:v>    downrange wind zone, repeatable:\n\
      \x20                            speed m/s, angle deg (0=headwind),\n\
      \x20                            until downrange m, vertical m/s\n\
+     \x20 --wind-profile <a:s:d,...> vertical wind profile: altitude m,\n\
+     \x20                            speed m/s, FROM-direction deg (0=headwind)\n\
+     \x20 --wind-sounding <path>   radiosonde file as the profile (native CLI)\n\
      \x20 --turbulence <sigma>     deterministic gust RMS per axis, m/s [0]\n\
      \x20 --turbulence-tau <s>     gust correlation period [2.0]\n\
      \x20 --atmo-zone <t:p:h:u>    atmosphere zone, repeatable: temp C,\n\
@@ -217,6 +220,8 @@ pub(crate) struct Options {
     pub(crate) wind_mps: Vec3,
     #[cfg(feature = "ballistics")]
     pub(crate) wind_zones: Vec<(f64, f64, f64, f64)>,
+    #[cfg(feature = "ballistics")]
+    pub(crate) wind_profile: Option<winds_engine::ProfileField>,
     #[cfg(feature = "ballistics")]
     pub(crate) turbulence: Option<(f64, f64)>,
     #[cfg(feature = "ballistics")]
@@ -443,6 +448,10 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     #[cfg(feature = "ballistics")]
     let mut turbulence_tau = None;
     #[cfg(feature = "ballistics")]
+    let mut wind_profile = None;
+    #[cfg(feature = "ballistics")]
+    let mut wind_sounding = None;
+    #[cfg(feature = "ballistics")]
     let mut wind_zones = Vec::new();
     #[cfg(feature = "ballistics")]
     let mut atmo_zones = Vec::new();
@@ -597,6 +606,10 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
             #[cfg(feature = "ballistics")]
             "--twist-in" => twist_in = Some(parse_f64(&value(flag)?, flag)?),
             #[cfg(feature = "ballistics")]
+            "--wind-profile" => wind_profile = Some(value(flag)?),
+            #[cfg(feature = "ballistics")]
+            "--wind-sounding" => wind_sounding = Some(value(flag)?),
+            #[cfg(feature = "ballistics")]
             "--turbulence" => turbulence = Some(parse_f64(&value(flag)?, flag)?),
             #[cfg(feature = "ballistics")]
             "--turbulence-tau" => turbulence_tau = Some(parse_f64(&value(flag)?, flag)?),
@@ -701,6 +714,63 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     if geometry_masses.is_some() && geometry.is_none() {
         return Err("error: --geometry-masses needs --geometry".to_string());
     }
+    #[cfg(feature = "ballistics")]
+    let wind_profile = {
+        let parsed = match (wind_profile, wind_sounding) {
+            (Some(_), Some(_)) => {
+                return Err("error: use only one of --wind-profile and --wind-sounding".to_string())
+            }
+            (Some(spec), None) => {
+                let mut levels = Vec::new();
+                for entry in spec.split(',') {
+                    let fields: Vec<&str> = entry.split(':').collect();
+                    if fields.len() != 3 {
+                        return Err("error: --wind-profile needs alt:speed:dir entries".to_string());
+                    }
+                    let f = |s: &str, what: &str| {
+                        s.parse::<f64>().map_err(|_| {
+                            format!("error: --wind-profile {what} '{s}' is not numeric")
+                        })
+                    };
+                    levels.push(winds_engine::ProfileLevel {
+                        altitude_m: f(fields[0], "altitude")?,
+                        speed_mps: f(fields[1], "speed")?,
+                        direction_from_deg: f(fields[2], "direction")?,
+                    });
+                }
+                Some(winds_engine::ProfileField::new(levels).map_err(|e| format!("error: {e}"))?)
+            }
+            (None, Some(path)) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let text = std::fs::read_to_string(&path)
+                        .map_err(|e| format!("error: could not read sounding: {e}"))?;
+                    let sounding =
+                        winds_engine::Sounding::parse(&text).map_err(|e| format!("error: {e}"))?;
+                    Some(
+                        sounding
+                            .to_profile_field()
+                            .map_err(|e| format!("error: {e}"))?,
+                    )
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = path;
+                    return Err(
+                        "error: --wind-sounding reads files and is native CLI only".to_string()
+                    );
+                }
+            }
+            (None, None) => None,
+        };
+        if parsed.is_some() && (wind_mps != Vec3::zeros() || !wind_zones.is_empty()) {
+            return Err(
+                "error: --wind-profile/--wind-sounding conflict with --wind and --wind-zone"
+                    .to_string(),
+            );
+        }
+        parsed
+    };
     let recover_main = match (recover_main, recover) {
         (Some(_), None) => return Err("error: --recover-main needs --recover".to_string()),
         (Some(cd_area), Some(_)) => Some((cd_area, main_altitude_m.unwrap_or(300.0))),
@@ -771,6 +841,8 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
         wind_mps,
         #[cfg(feature = "ballistics")]
         wind_zones,
+        #[cfg(feature = "ballistics")]
+        wind_profile,
         #[cfg(feature = "ballistics")]
         turbulence,
         #[cfg(feature = "ballistics")]
@@ -912,6 +984,14 @@ impl<G: Guidance> Guidance for WithSteering<G> {
 
 fn fmt_err(e: Error) -> String {
     format!("error: {e}")
+}
+
+/// Share a parsed profile field with the forces, weathercock and recovery.
+#[cfg(feature = "ballistics")]
+fn wind_field_arc(
+    profile: &winds_engine::ProfileField,
+) -> std::sync::Arc<dyn winds_engine::WindField + Send + Sync> {
+    std::sync::Arc::new(profile.clone())
 }
 
 /// Assemble the rocket, environment and guidance chain, then integrate.
@@ -1143,6 +1223,11 @@ pub(crate) fn run_trajectory(
                         .with_wind_segments(opts.wind_zones.clone())
                         .map_err(fmt_err)?;
                 }
+                if let Some(profile) = &opts.wind_profile {
+                    forces = forces
+                        .with_wind_field(wind_field_arc(profile))
+                        .map_err(fmt_err)?;
+                }
                 if let Some((sigma, tau)) = opts.turbulence {
                     forces = forces
                         .with_turbulence(sigma, tau, opts.turbulence_seed)
@@ -1209,6 +1294,11 @@ pub(crate) fn run_trajectory(
                 .with_wind_segments(opts.wind_zones.clone())
                 .map_err(fmt_err)?;
         }
+        if let Some(profile) = &opts.wind_profile {
+            recovery = recovery
+                .with_wind_field(wind_field_arc(profile))
+                .map_err(fmt_err)?;
+        }
         base = Forces::Recovered(Box::new(recovery));
     }
     #[cfg(not(feature = "ballistics"))]
@@ -1250,6 +1340,11 @@ pub(crate) fn run_trajectory(
         if !opts.wind_zones.is_empty() {
             weathercock = weathercock
                 .with_wind_segments(opts.wind_zones.clone())
+                .map_err(fmt_err)?;
+        }
+        if let Some(profile) = &opts.wind_profile {
+            weathercock = weathercock
+                .with_wind_field(wind_field_arc(profile))
                 .map_err(fmt_err)?;
         }
         guidance_base = Box::new(weathercock);
@@ -1795,6 +1890,44 @@ mod tests {
         ))
         .unwrap_err();
         assert!(err.contains("--recover-main needs --recover"), "got {err}");
+    }
+
+    #[cfg(feature = "ballistics")]
+    #[test]
+    fn wind_profile_flies_and_is_deterministic() {
+        let cmd = "simulate --motor estes:d12 \
+             --geometry nose=ogive:0.07:0.024,tube=0.2:0.024,fins=3:0.05:0.03:0.05:0.02:0.0032 \
+             --geometry-masses 0.00427,0.00741,0.01306 --weathercock --rail 1 \
+             --wind-profile 0:0:0,500:5:0,2000:10:0 --recover 0.25 --duration-s 20 --dt-s 0.5";
+        let out = run(&argv(cmd)).unwrap();
+        assert!(out.contains("apogee"), "got {out}");
+        assert_eq!(out, run(&argv(cmd)).unwrap());
+        // Conflicts: uniform wind and zones are exclusive with a profile.
+        let err = run(&argv(&format!("{cmd} --wind 1,0,0"))).unwrap_err();
+        assert!(err.contains("conflict"), "got {err}");
+        let err = run(&argv(&format!("{cmd} --wind-zone 5:0:100:0"))).unwrap_err();
+        assert!(err.contains("conflict"), "got {err}");
+        // Bad spec shape.
+        let err = run(&argv(
+            "simulate --curve 0:0,1:10,1.5:0 --dry-mass 0.5 --propellant-mass 0.05 \
+             --wind-profile 0:0,500:5:0 --diameter-m 0.05 --cd 0:0.4,3:0.4",
+        ))
+        .unwrap_err();
+        assert!(err.contains("alt:speed:dir"), "got {err}");
+    }
+
+    #[cfg(feature = "ballistics")]
+    #[test]
+    fn wind_sounding_flies_the_real_data_path() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/sounding_test.txt");
+        let out = run(&argv(&format!(
+            "simulate --motor estes:d12 \
+             --geometry nose=ogive:0.07:0.024,tube=0.2:0.024,fins=3:0.05:0.03:0.05:0.02:0.0032 \
+             --geometry-masses 0.00427,0.00741,0.01306 --weathercock --rail 1 \
+             --wind-sounding {path} --recover 0.25 --duration-s 20 --dt-s 0.5"
+        )))
+        .unwrap();
+        assert!(out.contains("apogee"), "got {out}");
     }
 
     #[cfg(feature = "ballistics")]

@@ -84,6 +84,7 @@ pub struct Weathercock {
     atmos_params: (f64, f64, f64, f64),
     wind_mps: Vec3,
     wind_sock: Option<ballistics_engine::wind::WindSock>,
+    wind_field: Option<crate::ballistics::SharedWindField>,
     turbulence: Option<crate::ballistics::Turbulence>,
     axis: Vec3,
     rate: Vec3,
@@ -110,6 +111,7 @@ impl Weathercock {
             atmosphere,
             wind_mps,
             wind_sock: None,
+            wind_field: None,
             turbulence: None,
             axis: initial_axis.normalize(),
             rate: Vec3::zeros(),
@@ -163,6 +165,16 @@ impl Weathercock {
         Ok(())
     }
 
+    /// Sample the same winds-engine field as the force model, so the axis
+    /// responds to the same air the drag sees.
+    pub fn with_wind_field(
+        mut self,
+        field: std::sync::Arc<dyn winds_engine::WindField + Send + Sync>,
+    ) -> Result<Self> {
+        self.wind_field = Some(crate::ballistics::SharedWindField(field));
+        Ok(self)
+    }
+
     fn cg_m(&self, context: &GuidanceContext<'_>) -> f64 {
         let total = context.rocket.mass_kg;
         let prop = context.rocket.motor.propellant_mass_kg;
@@ -176,9 +188,22 @@ impl Weathercock {
 impl Guidance for Weathercock {
     fn command(&mut self, context: GuidanceContext<'_>) -> Result<ControlInput> {
         let dt = context.step_duration_s;
-        let base_wind = match &self.wind_sock {
-            Some(sock) => sock.vector_for_range_stateless(context.state.position_m.x),
-            None => self.wind_mps,
+        let base_wind = match &self.wind_field {
+            Some(field) => {
+                let w = field.0.wind(
+                    context.state.time_s,
+                    [
+                        context.state.position_m.x,
+                        context.state.position_m.y,
+                        context.state.position_m.z,
+                    ],
+                );
+                Vec3::new(w.x_mps, w.y_mps, w.z_mps)
+            }
+            None => match &self.wind_sock {
+                Some(sock) => sock.vector_for_range_stateless(context.state.position_m.x),
+                None => self.wind_mps,
+            },
         };
         let wind = match &self.turbulence {
             Some(t) => base_wind + t.gust_vec(context.state.time_s),

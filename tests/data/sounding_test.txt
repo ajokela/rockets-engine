@@ -1,0 +1,7 @@
+# station: TEST
+# valid: 2026-10-25T00:00:00Z
+# columns: altitude_m speed_mps direction_from_deg
+0 0 0
+500 4 90
+1000 8 90
+2000 12 45
