@@ -12,7 +12,7 @@ The crate is published on crates.io and consumes `ballistics-engine` 0.48.0 from
 
 ```toml
 [dependencies]
-rockets-engine = "0.8"
+rockets-engine = "0.10"
 ```
 
 ## Run
