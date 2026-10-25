@@ -126,8 +126,8 @@ fn help() -> String {
      \x20 --center <x,y,z>         central-gravity center [0,0,0]\n\
      \x20 --radius-m <R>           central gravity: planet radius [6371000];\n\
      \x20                            the ground is the sphere of radius\n\
-     \x20                            R + ground altitude about --center, so\n\
-     \x20                            --center 0,-R,0 launches from the pad\n\
+     \x20                            R + ground altitude about --center. The\n\
+     \x20                            default pad must sit on it: --center 0,-R,0\n\
      \x20 --space-above-m <alt>    above this altitude use vacuum (flat frame)\n\
      \n\
      ATMOSPHERE & AERO (feature 'ballistics', default)\n\
@@ -805,13 +805,14 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     } else if radius_m.is_some() {
         return Err("error: --radius-m needs --gravity central".to_string());
     }
+    let default_pad = position_m.is_none();
     let position_m = position_m.unwrap_or(Vec3::new(0.0, ground_altitude_m, 0.0));
     let ground = if gravity == GravityMode::Central {
         let radius_m = radius_m.unwrap_or(EARTH_MEAN_RADIUS_M);
-        if !radius_m.is_finite() || radius_m + ground_altitude_m <= 0.0 {
+        if !(radius_m.is_finite() && radius_m > 0.0) || radius_m + ground_altitude_m <= 0.0 {
             return Err(
-                "error: --radius-m must be finite and the ground sphere's radius \
-                 (--radius-m + --ground-altitude-m) positive"
+                "error: --radius-m must be positive and finite, and the ground sphere's \
+                 radius (--radius-m + --ground-altitude-m) positive"
                     .to_string(),
             );
         }
@@ -840,6 +841,17 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
                  (--radius-m + --ground-altitude-m) about --center {},{},{}. Put --center at \
                  0,-R,0 to launch from 0,ground,0, or start at --position-m R + h from --center",
                 -height_m, center_m.x, center_m.y, center_m.z
+            ));
+        }
+        // The default pad stands on the ground, which needs --center R + E
+        // below it; anywhere else it would float and fly the drop as range.
+        Ground::Sphere { center_m, radius_m } if default_pad && height_m > 1e-12 * radius_m => {
+            return Err(format!(
+                "error: the default pad (0,{ground_altitude_m},0) is {height_m:.3} m above the \
+                 ground, the sphere of radius {radius_m} m (--radius-m + --ground-altitude-m) \
+                 about --center {},{},{}. Put --center at 0,-R,0 with R = --radius-m, or give \
+                 --position-m to launch from altitude",
+                center_m.x, center_m.y, center_m.z
             ));
         }
         _ => {}

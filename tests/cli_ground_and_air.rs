@@ -340,3 +340,36 @@ fn radius_needs_central_gravity() {
     let err = sim(&format!("{SHOT} --radius-m 6371000")).unwrap_err();
     assert!(err.contains("--radius-m needs --gravity central"), "{err}");
 }
+
+#[test]
+fn the_default_pad_must_sit_on_the_ground_sphere() {
+    // The default pad (0, E, 0) is on the ground only when --center is
+    // R + E below it. Any other offset would leave it floating above the
+    // sphere and fly the drop as extra range: refused, with the fix named.
+    for line in [
+        // WGS-84's equatorial radius as the offset, Earth's mean as R.
+        format!("{ARC} --center 0,-6378137,0"),
+        // The center offset by R + E instead of R.
+        format!("{ARC} --center 0,-6372500,0 --ground-altitude-m 1500"),
+        format!("{ARC} --center 0,-6371000,0 --radius-m 6370000"),
+    ] {
+        let err = sim(&line).unwrap_err();
+        assert!(err.contains("default pad"), "{line}: {err}");
+        assert!(err.contains("above the ground"), "{line}: {err}");
+    }
+    // An explicit start above the sphere is a launch from altitude.
+    let out = sim(&format!("{ARC} --position-m 0,6471000,0")).unwrap();
+    assert_eq!(impact_numbers(&out).len(), 4, "{out}");
+}
+
+#[test]
+fn the_planet_radius_must_be_positive() {
+    for radius in ["-50", "0", "nan"] {
+        let err = sim(&format!(
+            "{ARC} --mu 1 --center 0,-50,0 --radius-m {radius} --ground-altitude-m 100 \
+             --position-m 0,50,0 --duration-s 2"
+        ))
+        .unwrap_err();
+        assert!(err.contains("--radius-m must be"), "{radius}: {err}");
+    }
+}
