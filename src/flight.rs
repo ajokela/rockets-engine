@@ -174,6 +174,8 @@ pub struct AltitudeSwitch<Below, Above> {
 
 impl<Below, Above> AltitudeSwitch<Below, Above> {
     /// Switch from `below` to `above` at `cutoff_altitude_m` (inclusive below).
+    /// The cutoff is compared with position Y in the world frame, which is
+    /// altitude above sea level with `BallisticForces`.
     pub fn new(below: Below, above: Above, cutoff_altitude_m: f64) -> Result<Self> {
         if !cutoff_altitude_m.is_finite() {
             return Err(Error::invalid("cutoff_altitude_m", "must be finite"));
@@ -192,7 +194,8 @@ impl<Below, Above> AltitudeSwitch<Below, Above> {
     pub fn above(&self) -> &Above {
         &self.above
     }
-    /// Handoff altitude in metres.
+    /// Handoff altitude in metres, compared with position Y in the world
+    /// frame (altitude above sea level with `BallisticForces`).
     pub fn cutoff_altitude_m(&self) -> f64 {
         self.cutoff_altitude_m
     }

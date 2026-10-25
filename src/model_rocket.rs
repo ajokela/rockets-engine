@@ -190,7 +190,9 @@ mod recovery {
         /// Dual deployment: once the vehicle is recovering and at or below
         /// `altitude_m`, recovery drag uses the main parachute's Cd·A
         /// instead of the drogue's. Pure function of state, like the
-        /// deployment gate itself.
+        /// deployment gate itself. `altitude_m` is compared with position Y
+        /// in the world frame, which with `BallisticForces` is altitude above
+        /// sea level, not height above the launch pad.
         pub fn with_main(mut self, cd_area_m2: f64, altitude_m: f64) -> Result<Self> {
             if !cd_area_m2.is_finite() || cd_area_m2 <= 0.0 {
                 return Err(crate::Error::invalid(

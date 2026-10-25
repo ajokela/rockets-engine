@@ -96,9 +96,13 @@ fn help() -> String {
      \x20 --elevation-deg <deg>    launch elevation above horizontal [90]\n\
      \x20 --azimuth-deg <deg>      launch azimuth from +X toward +Z [0]\n\
      \x20 --speed-mps <v>          initial speed along the launch axis [0]\n\
-     \x20 --position-m <x,y,z>     initial position; y is altitude above\n\
-     \x20                            sea level, and the ground is sea level\n\
-     \x20                            (impact at y = 0) [0,0,0]\n\
+     \x20 --position-m <x,y,z>     initial position [0,0,0]. Flat frame\n\
+     \x20                            (uniform or vacuum gravity): y is altitude\n\
+     \x20                            above sea level and the ground is sea\n\
+     \x20                            level (impact at y = 0). With --gravity\n\
+     \x20                            central it is in --center's frame; a\n\
+     \x20                            center at 0,-R,0 (R = planet radius)\n\
+     \x20                            keeps y near altitude at the launch point\n\
      \x20 --prograde              thrust follows velocity (gravity turn)\n\
      \x20 --weathercock           second-order body-axis dynamics toward the\n\
      \x20                            relative wind (needs --cna, --cp, --cg-dry-m,\n\
@@ -131,7 +135,11 @@ fn help() -> String {
      \x20 --turbulence <sigma>     deterministic gust RMS per axis, m/s [0]\n\
      \x20 --turbulence-tau <s>     gust correlation period [2.0]\n\
      \x20 --atmo-zone <t:p:h:u>    atmosphere zone, repeatable: temp C,\n\
-     \x20                            pressure hPa, humidity %, until downrange m\n\
+     \x20                            pressure hPa, humidity %, until downrange m;\n\
+     \x20                            temp and pressure are the air at y = 0,\n\
+     \x20                            i.e. sea level, where the CLI's weather\n\
+     \x20                            station is: a high pad's station reading\n\
+     \x20                            here gets the altitude lapse twice\n\
      \x20 --twist-in <in/turn>     effective spin twist; enables Magnus + yaw\n\
      \x20                            of repose (needs --body-length-m)\n\
      \x20 --body-length-m <m>       airframe length for the spin model\n\
