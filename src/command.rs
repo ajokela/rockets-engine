@@ -99,7 +99,9 @@ fn help() -> String {
      \x20 --speed-mps <v>          initial speed along the launch axis [0]\n\
      \x20 --ground-altitude-m <m>  altitude above sea level of the ground and\n\
      \x20                            the weather station [0]; impact is y\n\
-     \x20                            reaching it (central gravity: the sphere)\n\
+     \x20                            reaching it (central gravity: the sphere).\n\
+     \x20                            Flat frame: -1000 to 11000 m, the ICAO\n\
+     \x20                            troposphere the station's air comes from\n\
      \x20 --position-m <x,y,z>     initial position [0,ground,0]. Flat frame\n\
      \x20                            (uniform or vacuum gravity): y is altitude\n\
      \x20                            above sea level, at or above the ground.\n\
@@ -219,9 +221,10 @@ pub(crate) struct Options {
     pub(crate) geometry_masses: Option<(f64, f64, f64)>,
     /// (casing mass kg, motor length m) retained from a motor file.
     pub(crate) motor_casing: Option<(f64, f64)>,
-    /// The weather station: ICAO standard air at the ground altitude.
+    /// The weather station: ICAO standard air at the ground altitude. The
+    /// flat frame only; central gravity refuses every force that reads air.
     #[cfg(feature = "ballistics")]
-    pub(crate) atmosphere: crate::ballistics::Atmosphere,
+    pub(crate) atmosphere: Option<crate::ballistics::Atmosphere>,
     #[cfg(feature = "ballistics")]
     pub(crate) diameter_m: Option<f64>,
     #[cfg(feature = "ballistics")]
@@ -252,6 +255,17 @@ pub(crate) struct Options {
     pub(crate) cna: Option<Vec<(f64, f64)>>,
     #[cfg(feature = "ballistics")]
     pub(crate) lift_k: Option<Vec<(f64, f64)>>,
+}
+
+#[cfg(feature = "ballistics")]
+impl Options {
+    /// The weather station every force that reads air is built on.
+    fn station(&self) -> Result<crate::ballistics::Atmosphere, String> {
+        self.atmosphere.ok_or_else(|| {
+            "error: forces that read air need the flat frame (uniform or vacuum gravity)"
+                .to_string()
+        })
+    }
 }
 
 /// Earth's mean radius, the default `--radius-m` for central gravity.
@@ -780,11 +794,23 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     if !ground_altitude_m.is_finite() {
         return Err("error: --ground-altitude-m must be finite".to_string());
     }
+    // The weather station is ICAO standard air at the ground, so in the flat
+    // frame the ground must lie in the troposphere. Central gravity refuses
+    // every force that reads air, so it has no station and takes any ground.
     #[cfg(feature = "ballistics")]
-    let atmosphere = crate::ballistics::Atmosphere::icao_standard(ground_altitude_m).map_err(|_| {
-        let (lowest, highest) = crate::ballistics::ICAO_STATION_RANGE_M;
-        format!("error: --ground-altitude-m must be between {lowest} and {highest} m (the troposphere)")
-    })?;
+    let atmosphere = if gravity == GravityMode::Central {
+        None
+    } else {
+        Some(
+            crate::ballistics::Atmosphere::icao_standard(ground_altitude_m).map_err(|_| {
+                let (lowest, highest) = crate::ballistics::ICAO_STATION_RANGE_M;
+                format!(
+                    "error: --ground-altitude-m must be between {lowest} and {highest} m in the \
+                     flat frame (the troposphere the weather station's standard air comes from)"
+                )
+            })?,
+        )
+    };
     if gravity == GravityMode::Central {
         if recover.is_some() {
             return Err(
@@ -1230,7 +1256,7 @@ pub(crate) fn run_trajectory(
                 let mut forces = crate::ballistics::BallisticForces::new(
                     diameter,
                     cd,
-                    opts.atmosphere,
+                    opts.station()?,
                     opts.wind_mps,
                 )
                 .map_err(fmt_err)?;
@@ -1315,7 +1341,7 @@ pub(crate) fn run_trajectory(
             BoxedForces(Box::new(base)),
             cd_area,
             opts.recovery_after_s,
-            opts.atmosphere,
+            opts.station()?,
             opts.wind_mps,
         )
         .map_err(fmt_err)?;
@@ -1365,7 +1391,7 @@ pub(crate) fn run_trajectory(
             opts.damping_ratio,
         )
         .map_err(fmt_err)?;
-        let mut weathercock = crate::Weathercock::new(params, axis, opts.atmosphere, opts.wind_mps)
+        let mut weathercock = crate::Weathercock::new(params, axis, opts.station()?, opts.wind_mps)
             .map_err(fmt_err)?;
         if !opts.atmo_zones.is_empty() {
             weathercock = weathercock

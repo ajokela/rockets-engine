@@ -374,6 +374,29 @@ fn the_planet_radius_must_be_positive() {
     }
 }
 
+/// A launch-local Mars hop from a pad `ground` metres above the datum.
+fn mars_hop(ground: &str) -> String {
+    format!(
+        "simulate --curve 0:0,0.05:50,0.1:0 --dry-mass 1.0 --propellant-mass 0.01 \
+         --speed-mps 100 --elevation-deg 45 --duration-s 60 --dt-s 0.5 --gravity central \
+         --mu 4.282837e13 --radius-m 3389500 --center 0,-3389500,0 --ground-altitude-m {ground}"
+    )
+}
+
+#[test]
+fn central_gravity_takes_a_ground_outside_the_troposphere() {
+    // No force reads air under central gravity, so the ICAO station's
+    // -1000..11000 m range does not bound the ground there: Olympus Mons
+    // and Hellas both fly and land.
+    for ground in ["21000", "-7000"] {
+        let out = sim(&mars_hop(ground)).unwrap();
+        assert_eq!(impact_numbers(&out).len(), 4, "{ground}: {out}");
+    }
+    // The flat frame's station is still ICAO air at the ground.
+    let err = sim(&format!("{SHOT} --ground-altitude-m 21000")).unwrap_err();
+    assert!(err.contains("--ground-altitude-m must be"), "{err}");
+}
+
 /// The rows of the ASCII chart, title first.
 fn chart(out: &str) -> Vec<&str> {
     out.lines()
