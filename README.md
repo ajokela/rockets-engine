@@ -12,7 +12,7 @@ The crate is published on crates.io and consumes `ballistics-engine` 0.48.0 from
 
 ```toml
 [dependencies]
-rockets-engine = "0.10"
+rockets-engine = "0.11"
 ```
 
 ## Run
@@ -134,7 +134,7 @@ This baseline follows the thrust-curve, propellant-mass, gravity and drag struct
 - `RailForces` wraps any force model and projects environmental acceleration onto a launch rail until exit; command the thrust axis along the rail and no steering until exit, then let tip-off take over.
 - `BoxedGuidance`/`BoxedForces` are type-erased handles for heterogeneous decorator/model chains.
 - `with_atmosphere_zones` and `with_wind_segments` on `BallisticForces` expose the upstream downrange-segmented atmosphere and wind ladders, evaluated statelessly at each stage's downrange position.
-- `with_turbulence(sigma, tau, seed)` adds deterministic frozen-field gusts: eight multisine components per axis with a pink (1/f) spectrum, RMS `sigma` per axis and energy near the period `tau` (default 2 s via `--turbulence-tau`). Stateless, so RK4 substeps, snapshots, replays and `--seed` reproduction all see identical wind at identical times; dispersion reseeds per run so every Monte-Carlo sample gets its own gust realization. The weathercock takes the same gust field, so the axis responds to the same air the drag sees. CLI: `--turbulence <sigma_mps>`.
+- `with_turbulence(sigma, tau, seed)` adds deterministic frozen-field gusts: eight multisine components per axis with a pink (1/f) spectrum, RMS `sigma` per axis and energy near the period `tau` (default 2 s via `--turbulence-tau`). Stateless, so RK4 substeps, snapshots, replays and `--seed` reproduction all see identical wind at identical times; dispersion reseeds per run so every Monte-Carlo sample gets its own gust realization. The weathercock and the recovery descent take the same gust field and the same wind-zone ladder, so attitude and drift respond to the same air the drag sees. CLI: `--turbulence <sigma_mps>`.
 
 The atmospheric adapter uses the body's own Cd-versus-Mach curve and updates both SI mass and the engine's imperial mass mirror. It includes gravity and drag; bullet-specific reference-BC and postprocessing effects (Litz spin drift) are disabled. Standard atmosphere delegates to the upstream altitude model: humidity affects density, while this derivative path uses dry-air sound speed. Uniform atmosphere obeys the upstream direct-mode limits (`0 ≤ density < 2 kg/m³`, sound speed `> 200 m/s`); a zero density retains gravity but removes drag. `UniformGravity(Vec3::zeros())` gives an inertial vacuum.
 
@@ -159,7 +159,7 @@ The Cnα/CP output is validated against OpenRocket's own test suite (`tests/open
 The `model` feature (default on) adds hobbyist conveniences:
 
 - `MotorFile` parses RASP `.eng` motor text — manufacturer, designation, diameter/length, delays, propellant and total masses, and the thrust samples. `motor(ignition_s)` schedules it. `--motor-eng` takes inline text; `--motor-file` reads from disk in the native CLI.
-- `RecoveryForces` wraps any force model and swaps in recovery drag once the vehicle is descending, with an optional absolute-time deployment gate (`--recover <cdA>`, `--recovery-after-s <t>`). Terminal velocity `sqrt(2mg/(ρ·CdA))` emerges naturally. Deployment is a pure function of state, so integration stays deterministic.
+- `RecoveryForces` wraps any force model and swaps in recovery drag once the vehicle is descending (strictly: `vy < 0`, so a standing wind at liftoff cannot trip the chute on the pad), with an optional absolute-time deployment gate (`--recover <cdA>`, `--recovery-after-s <t>`). Terminal velocity `sqrt(2mg/(ρ·CdA))` emerges naturally. Deployment is a pure function of state, so integration stays deterministic. Dual deployment adds a main parachute that swaps in below an altitude (`with_main`, `--recover-main <cdA> --main-altitude-m <m>`). The descent samples the same wind zones and turbulence as the ascent.
 - `Airframe::sport_24mm()` and `Airframe::high_power_54mm()` are *illustrative* presets (not measured kit data): diameter, Cd, Cnα, CP, CG, pitch inertia, induced-k and recovery Cd·A in one bundle. `--airframe sport24` or `hp54` fills the same options and composes with `--weathercock`.
 
 ### Modified point-mass

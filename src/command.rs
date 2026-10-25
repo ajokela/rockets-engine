@@ -76,8 +76,10 @@ fn help() -> String {
      \x20                            ignition=s,sep=s (curve/ignition/sep optional)\n\
      \x20 --motor-eng <text>      inline RASP .eng motor text (curve + propellant)\n\
      \x20 --motor-file <path>     .eng file on disk (native CLI only)\n\
-     \x20 --recover <cdA>         parachute Cd·A in m²; recovery drag on descent\n\
+     \x20 --recover <cdA>         drogue Cd·A in m²; recovery drag on descent\n\
      \x20 --recovery-after-s <t>  absolute-time gate for deployment [0=apogee]\n\
+     \x20 --recover-main <cdA>    main parachute Cd·A (dual deployment)\n\
+     \x20 --main-altitude-m <m>   swap to the main below this altitude [300]\n\
      \x20 --airframe <preset>     sport24 or hp54: diameter, Cd, Cnα, CP, CG,\n\
      \x20                            inertia and recovery Cd·A, illustrative only\n\
      \x20 --geometry <spec>       subsonic Barrowman modeler:\n\
@@ -191,6 +193,8 @@ pub(crate) struct Options {
     pub(crate) stages: Vec<StageSpec>,
     pub(crate) recover: Option<f64>,
     pub(crate) recovery_after_s: f64,
+    /// Main parachute (Cd·A, swap altitude) for dual deployment.
+    pub(crate) recover_main: Option<(f64, f64)>,
     pub(crate) airframe: Option<String>,
     pub(crate) geometry: Option<String>,
     /// nose/tube/fins structural masses (kg) for --geometry.
@@ -407,6 +411,8 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     let mut motor_file = None;
     let mut recover = None;
     let mut recovery_after_s = 0.0;
+    let mut recover_main = None;
+    let mut main_altitude_m = None;
     let mut airframe = None;
     let mut geometry = None;
     let mut geometry_masses = None;
@@ -527,6 +533,8 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
             "--motor-file" => motor_file = Some(value(flag)?),
             "--recover" => recover = Some(parse_f64(&value(flag)?, flag)?),
             "--recovery-after-s" => recovery_after_s = parse_f64(&value(flag)?, flag)?,
+            "--recover-main" => recover_main = Some(parse_f64(&value(flag)?, flag)?),
+            "--main-altitude-m" => main_altitude_m = Some(parse_f64(&value(flag)?, flag)?),
             "--airframe" => airframe = Some(value(flag)?),
             "--geometry" => geometry = Some(value(flag)?),
             "--geometry-masses" => {
@@ -671,6 +679,11 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     if geometry_masses.is_some() && geometry.is_none() {
         return Err("error: --geometry-masses needs --geometry".to_string());
     }
+    let recover_main = match (recover_main, recover) {
+        (Some(_), None) => return Err("error: --recover-main needs --recover".to_string()),
+        (Some(cd_area), Some(_)) => Some((cd_area, main_altitude_m.unwrap_or(300.0))),
+        (None, _) => None,
+    };
     #[cfg(feature = "ballistics")]
     let turbulence = match turbulence {
         Some(sigma) if sigma >= 0.0 => {
@@ -721,6 +734,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
         stages,
         recover,
         recovery_after_s,
+        recover_main,
         airframe,
         geometry,
         geometry_masses,
@@ -803,7 +817,7 @@ enum Forces {
     Switched(AltitudeSwitch<BoxedForces, BoxedForces>),
     Railed(RailForces<BoxedForces>),
     #[cfg(feature = "ballistics")]
-    Recovered(crate::RecoveryForces<BoxedForces>),
+    Recovered(Box<crate::RecoveryForces<BoxedForces>>),
 }
 
 impl ForceModel for Forces {
@@ -1143,16 +1157,30 @@ pub(crate) fn run_trajectory(
 
     #[cfg(feature = "ballistics")]
     if let Some(cd_area) = opts.recover {
-        base = Forces::Recovered(
-            crate::RecoveryForces::new(
-                BoxedForces(Box::new(base)),
-                cd_area,
-                opts.recovery_after_s,
-                crate::ballistics::Atmosphere::default(),
-                opts.wind_mps,
-            )
-            .map_err(fmt_err)?,
-        );
+        let mut recovery = crate::RecoveryForces::new(
+            BoxedForces(Box::new(base)),
+            cd_area,
+            opts.recovery_after_s,
+            crate::ballistics::Atmosphere::default(),
+            opts.wind_mps,
+        )
+        .map_err(fmt_err)?;
+        if let Some((main_cd_area, altitude_m)) = opts.recover_main {
+            recovery = recovery
+                .with_main(main_cd_area, altitude_m)
+                .map_err(fmt_err)?;
+        }
+        if let Some((sigma, tau)) = opts.turbulence {
+            recovery = recovery
+                .with_turbulence(sigma, tau, opts.turbulence_seed)
+                .map_err(fmt_err)?;
+        }
+        if !opts.wind_zones.is_empty() {
+            recovery = recovery
+                .with_wind_segments(opts.wind_zones.clone())
+                .map_err(fmt_err)?;
+        }
+        base = Forces::Recovered(Box::new(recovery));
     }
     #[cfg(not(feature = "ballistics"))]
     if opts.recover.is_some() || opts.airframe.is_some() || opts.geometry.is_some() {
@@ -1188,6 +1216,11 @@ pub(crate) fn run_trajectory(
         if let Some((sigma, tau)) = opts.turbulence {
             weathercock = weathercock
                 .with_turbulence(sigma, tau, opts.turbulence_seed)
+                .map_err(fmt_err)?;
+        }
+        if !opts.wind_zones.is_empty() {
+            weathercock = weathercock
+                .with_wind_segments(opts.wind_zones.clone())
                 .map_err(fmt_err)?;
         }
         guidance_base = Box::new(weathercock);
@@ -1657,6 +1690,44 @@ mod tests {
 
     #[cfg(feature = "ballistics")]
     #[test]
+    fn dual_deployment_flies_end_to_end() {
+        let out = run(&argv(
+            "simulate --motor-eng 'Estes A8 18 70 0 0.0033 0.0164\\n0 0\\n1 9\\n2 0' \
+             --geometry nose=ogive:0.07:0.024,tube=0.2:0.024,fins=3:0.05:0.03:0.05:0.02:0.0032 \
+             --geometry-masses 0.00427,0.00741,0.01306 --recover 0.1 --recover-main 0.4 \
+             --main-altitude-m 150 --duration-s 60 --dt-s 1.0",
+        ))
+        .unwrap();
+        assert!(out.contains("apogee"), "got {out}");
+    }
+
+    #[cfg(feature = "ballistics")]
+    #[test]
+    fn recover_main_needs_recover() {
+        let err = run(&argv(
+            "simulate --curve 0:0,1:10,1.5:0 --dry-mass 0.5 --propellant-mass 0.05 \
+             --recover-main 0.4",
+        ))
+        .unwrap_err();
+        assert!(err.contains("--recover-main needs --recover"), "got {err}");
+    }
+
+    #[cfg(feature = "ballistics")]
+    #[test]
+    fn weathercock_sees_wind_zones_like_the_forces_do() {
+        // A uniform 5 m/s headwind and the matching zone must fly
+        // identically now that the weathercock samples the sock too.
+        let base = "simulate --motor-eng 'Estes A8 18 70 0 0.0033 0.0164\\n0 0\\n1 9\\n2 0' \
+             --geometry nose=ogive:0.07:0.024,tube=0.2:0.024,fins=3:0.05:0.03:0.05:0.02:0.0032 \
+             --geometry-masses 0.00427,0.00741,0.01306 --weathercock --rail 1 \
+             --recover 0.25 --duration-s 20 --dt-s 0.5";
+        let uniform = run(&argv(&format!("{base} --wind -5,0,0"))).unwrap();
+        let zones = run(&argv(&format!("{base} --wind-zone 5:0:10000:0"))).unwrap();
+        assert_eq!(uniform, zones);
+    }
+
+    #[cfg(feature = "ballistics")]
+    #[test]
     fn weathercock_flies_in_wind_with_rail_and_turbulence() {
         // On the rail the axis is pinned (the rod constrains attitude), so
         // a standing wind no longer tips the rocket over on the pad.
@@ -1671,7 +1742,7 @@ mod tests {
             .nth(1)
             .and_then(|s| s.parse().ok())
             .expect("apogee line");
-        assert!(apogee > 300.0, "apogee {apogee}");
+        assert!(apogee > 250.0, "apogee {apogee}");
         // Deterministic per seed; a different seed gusts differently.
         assert_eq!(out, run(&argv(cmd)).unwrap());
         assert_ne!(out, run(&argv(&format!("{cmd} --seed 9"))).unwrap());

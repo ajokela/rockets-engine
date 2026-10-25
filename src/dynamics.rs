@@ -83,6 +83,7 @@ pub struct Weathercock {
     atmosphere: Atmosphere,
     atmos_params: (f64, f64, f64, f64),
     wind_mps: Vec3,
+    wind_sock: Option<ballistics_engine::wind::WindSock>,
     turbulence: Option<crate::ballistics::Turbulence>,
     axis: Vec3,
     rate: Vec3,
@@ -108,10 +109,32 @@ impl Weathercock {
             params,
             atmosphere,
             wind_mps,
+            wind_sock: None,
             turbulence: None,
             axis: initial_axis.normalize(),
             rate: Vec3::zeros(),
         })
+    }
+
+    /// Sample downrange-segmented wind like the force model does: each zone
+    /// applies until its downrange limit, then the next takes over.
+    pub fn with_wind_segments(mut self, zones: Vec<(f64, f64, f64, f64)>) -> Result<Self> {
+        let segments: Vec<ballistics_engine::wind::WindSegment> = zones
+            .into_iter()
+            .map(|(speed_mps, angle_deg, until_m, vertical_mps)| {
+                ballistics_engine::wind::WindSegment {
+                    speed_kmh: speed_mps * 3.6,
+                    angle_deg,
+                    until_m,
+                    vertical_mps,
+                }
+            })
+            .collect();
+        self.wind_sock = Some(
+            ballistics_engine::wind::WindSock::try_new(segments)
+                .map_err(|e| Error::Model(format!("invalid wind segments: {e:?}")))?,
+        );
+        Ok(self)
     }
 
     /// Add the same deterministic frozen-field turbulence as the force
@@ -153,9 +176,13 @@ impl Weathercock {
 impl Guidance for Weathercock {
     fn command(&mut self, context: GuidanceContext<'_>) -> Result<ControlInput> {
         let dt = context.step_duration_s;
-        let wind = match &self.turbulence {
-            Some(t) => self.wind_mps + t.gust_vec(context.state.time_s),
+        let base_wind = match &self.wind_sock {
+            Some(sock) => sock.vector_for_range_stateless(context.state.position_m.x),
             None => self.wind_mps,
+        };
+        let wind = match &self.turbulence {
+            Some(t) => base_wind + t.gust_vec(context.state.time_s),
+            None => base_wind,
         };
         let v_air = context.state.velocity_mps - wind;
         let speed = v_air.norm();

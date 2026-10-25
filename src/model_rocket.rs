@@ -143,8 +143,11 @@ mod recovery {
         atmosphere: Atmosphere,
         atmos_params: (f64, f64, f64, f64),
         wind_mps: Vec3,
+        wind_sock: Option<ballistics_engine::wind::WindSock>,
+        turbulence: Option<crate::ballistics::Turbulence>,
         recovery_cd_area_m2: f64,
         deploy_after_s: f64,
+        main: Option<(f64, f64)>,
     }
 
     impl<F> RecoveryForces<F> {
@@ -176,13 +179,80 @@ mod recovery {
                 atmos_params: atmosphere.parameters()?,
                 atmosphere,
                 wind_mps,
+                wind_sock: None,
+                turbulence: None,
                 recovery_cd_area_m2,
                 deploy_after_s,
+                main: None,
             })
         }
 
+        /// Dual deployment: once the vehicle is recovering and at or below
+        /// `altitude_m`, recovery drag uses the main parachute's Cd·A
+        /// instead of the drogue's. Pure function of state, like the
+        /// deployment gate itself.
+        pub fn with_main(mut self, cd_area_m2: f64, altitude_m: f64) -> Result<Self> {
+            if !cd_area_m2.is_finite() || cd_area_m2 <= 0.0 {
+                return Err(crate::Error::invalid(
+                    "main_cd_area_m2",
+                    "must be finite and positive",
+                ));
+            }
+            if !altitude_m.is_finite() {
+                return Err(crate::Error::invalid("main_altitude_m", "must be finite"));
+            }
+            self.main = Some((cd_area_m2, altitude_m));
+            Ok(self)
+        }
+
+        /// Add the same deterministic frozen-field turbulence as the force
+        /// model: equal `sigma`/`tau`/`seed` gives identical gusts, so the
+        /// descent drifts through the same air the ascent climbed through.
+        pub fn with_turbulence(mut self, sigma_mps: f64, tau_s: f64, seed: u64) -> Result<Self> {
+            self.turbulence = Some(crate::ballistics::Turbulence::new(sigma_mps, tau_s, seed)?);
+            Ok(self)
+        }
+
+        fn cd_area(&self, state: &FlightState) -> f64 {
+            match self.main {
+                Some((cd_area, altitude_m)) if state.position_m.y <= altitude_m => cd_area,
+                _ => self.recovery_cd_area_m2,
+            }
+        }
+
+        /// Sample downrange-segmented wind like the force model does.
+        pub fn with_wind_segments(mut self, zones: Vec<(f64, f64, f64, f64)>) -> Result<Self> {
+            let segments: Vec<ballistics_engine::wind::WindSegment> = zones
+                .into_iter()
+                .map(|(speed_mps, angle_deg, until_m, vertical_mps)| {
+                    ballistics_engine::wind::WindSegment {
+                        speed_kmh: speed_mps * 3.6,
+                        angle_deg,
+                        until_m,
+                        vertical_mps,
+                    }
+                })
+                .collect();
+            self.wind_sock = Some(
+                ballistics_engine::wind::WindSock::try_new(segments)
+                    .map_err(|e| crate::Error::Model(format!("invalid wind segments: {e:?}")))?,
+            );
+            Ok(self)
+        }
+
+        fn effective_wind(&self, state: &FlightState) -> Vec3 {
+            let base = match &self.wind_sock {
+                Some(sock) => sock.vector_for_range_stateless(state.position_m.x),
+                None => self.wind_mps,
+            };
+            match &self.turbulence {
+                Some(t) => base + t.gust_vec(state.time_s),
+                None => base,
+            }
+        }
+
         fn recovery_accel(&self, state: &FlightState, mass_kg: f64) -> Vec3 {
-            let v_air = state.velocity_mps - self.wind_mps;
+            let v_air = state.velocity_mps - self.effective_wind(state);
             let speed = v_air.norm();
             let g = Vec3::new(0.0, -ballistics_engine::constants::G_ACCEL_MPS2, 0.0);
             if speed < 1e-12 {
@@ -190,11 +260,13 @@ mod recovery {
             }
             let (rho, _) = local_air(self.atmosphere, self.atmos_params, state.position_m.y);
             let q = 0.5 * rho * speed * speed;
-            g - v_air * (q * self.recovery_cd_area_m2 / (speed * mass_kg))
+            g - v_air * (q * self.cd_area(state) / (speed * mass_kg))
         }
 
         fn recovering(&self, state: &FlightState) -> bool {
-            state.velocity_mps.y <= 0.0 && state.time_s >= self.deploy_after_s
+            // Strictly descending: vy == 0 (pad, exact apogee) is not yet a
+            // descent, so a standing wind at t = 0 cannot trip the chute.
+            state.velocity_mps.y < 0.0 && state.time_s >= self.deploy_after_s
         }
     }
 

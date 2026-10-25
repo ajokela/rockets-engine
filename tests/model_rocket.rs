@@ -64,6 +64,28 @@ fn recovery_passthrough_while_ascending() {
 }
 
 #[test]
+fn recovery_does_not_deploy_on_the_pad() {
+    // v = 0 at t = 0 is not a descent: the inner model passes through even
+    // with a strong wind, which would otherwise kick the "deployed" chute
+    // sideways off the pad.
+    let recovery = RecoveryForces::new(
+        UniformGravity::default(),
+        0.5,
+        0.0,
+        Atmosphere::default(),
+        Vec3::new(-5.0, 0.0, 0.0),
+    )
+    .unwrap();
+    let state = FlightState {
+        time_s: 0.0,
+        position_m: Vec3::zeros(),
+        velocity_mps: Vec3::zeros(),
+    };
+    let a = recovery.acceleration(&state, 0.3).unwrap();
+    assert_eq!(a, UniformGravity::default().0);
+}
+
+#[test]
 fn descent_reaches_the_analytic_terminal_velocity() {
     let cd_area = 0.5;
     let mass = 0.3;
@@ -97,6 +119,104 @@ fn descent_reaches_the_analytic_terminal_velocity() {
         "descent speed {measured} vs terminal {terminal}"
     );
     assert!(state.velocity_mps.y < 0.0);
+}
+
+#[test]
+fn dual_deployment_swaps_to_the_main_below_its_altitude() {
+    // Drogue 0.25 m² above 150 m, main 1.0 m² below: the descent settles at
+    // each parachute's analytic terminal velocity in turn.
+    let mass = 0.5;
+    let rocket = rockets_engine::Rocket::new(mass, None).unwrap();
+    let recovery = RecoveryForces::new(
+        UniformGravity::default(),
+        0.25,
+        0.0,
+        Atmosphere::default(),
+        Vec3::zeros(),
+    )
+    .unwrap()
+    .with_main(1.0, 150.0)
+    .unwrap();
+    let sim = Simulator::new(rocket, recovery, IntegratorSettings::default()).unwrap();
+    let mut state = FlightState {
+        time_s: 0.0,
+        position_m: Vec3::new(0.0, 250.0, 0.0),
+        velocity_mps: Vec3::zeros(),
+    };
+    // 15 s: settled on the drogue, still above the swap altitude.
+    for _ in 0..300 {
+        state = sim
+            .step(&state, 0.05, ControlInput::along(Vec3::y()))
+            .unwrap()
+            .state;
+    }
+    assert!(
+        state.position_m.y > 150.0,
+        "altitude {}",
+        state.position_m.y
+    );
+    let drogue_terminal = (2.0 * mass * 9.80665 / (1.225 * 0.25)).sqrt();
+    let measured = -state.velocity_mps.y;
+    assert!(
+        (measured - drogue_terminal).abs() / drogue_terminal < 0.03,
+        "drogue descent {measured} vs {drogue_terminal}"
+    );
+    // 45 more seconds: below 150 m, settled on the main.
+    for _ in 0..900 {
+        state = sim
+            .step(&state, 0.05, ControlInput::along(Vec3::y()))
+            .unwrap()
+            .state;
+    }
+    assert!(
+        state.position_m.y < 150.0,
+        "altitude {}",
+        state.position_m.y
+    );
+    let main_terminal = (2.0 * mass * 9.80665 / (1.225 * 1.0)).sqrt();
+    let measured = -state.velocity_mps.y;
+    assert!(
+        (measured - main_terminal).abs() / main_terminal < 0.03,
+        "main descent {measured} vs {main_terminal}"
+    );
+}
+
+#[test]
+fn main_parachute_validates_its_numbers() {
+    let recovery = RecoveryForces::new(
+        UniformGravity::default(),
+        0.25,
+        0.0,
+        Atmosphere::default(),
+        Vec3::zeros(),
+    )
+    .unwrap();
+    assert!(recovery.clone().with_main(-1.0, 150.0).is_err());
+    assert!(recovery.with_main(0.5, f64::NAN).is_err());
+}
+
+#[test]
+fn recovery_turbulence_is_deterministic_per_seed() {
+    let build = |seed| {
+        RecoveryForces::new(
+            UniformGravity::default(),
+            0.25,
+            0.0,
+            Atmosphere::default(),
+            Vec3::zeros(),
+        )
+        .unwrap()
+        .with_turbulence(2.0, 2.0, seed)
+        .unwrap()
+    };
+    let state = FlightState {
+        time_s: 3.3,
+        position_m: Vec3::new(0.0, 200.0, 0.0),
+        velocity_mps: Vec3::new(0.0, -5.0, 0.0),
+    };
+    let a = build(42).acceleration(&state, 0.5).unwrap();
+    assert_eq!(a, build(42).acceleration(&state, 0.5).unwrap());
+    assert_ne!(a, build(7).acceleration(&state, 0.5).unwrap());
 }
 
 #[test]
