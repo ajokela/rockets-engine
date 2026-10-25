@@ -8,8 +8,9 @@
 //! Induced drag from angle of attack uses the normal-force tilt model
 //! (Cd += Cnα·α²). Fin planforms are trapezoidal (closed form) or
 //! half-ellipse (OpenRocket's 48-strip integration). Not covered
-//! (deliberately): forward shoulders or multi-diameter bodies, free-form
-//! fins, and fin-body interference drag.
+//! (deliberately): forward shoulders or multi-diameter bodies and
+//! free-form fins. Fin-body interference drag is ignored, as it is in
+//! OpenRocket ("small compared to the other sources").
 
 use crate::{Error, Result};
 
@@ -132,13 +133,32 @@ pub struct EllipticalFins {
     pub thickness_m: f64,
 }
 
-/// The fin-set planform family.
+/// Identical free-form fins described by a planform polygon (vertices in
+/// metres: x aft from the root leading edge, y out from the body surface,
+/// starting and ending on y = 0). At most 16 vertices.
 #[derive(Debug, Clone, Copy)]
+pub struct FreeformFins {
+    /// Number of identical fins.
+    pub count: u32,
+    /// Planform polygon vertices, starting and ending on the body surface.
+    pub points: [(f64, f64); 16],
+    /// Number of vertices in `points`.
+    pub point_count: usize,
+    /// Fin thickness in metres.
+    pub thickness_m: f64,
+}
+
+/// The fin-set planform family. The free-form variant is large by design:
+/// the fixed 16-vertex array keeps `RocketGeometry` `Copy`.
+#[derive(Debug, Clone, Copy)]
+#[allow(clippy::large_enum_variant)]
 pub enum FinSet {
     /// Trapezoidal fins (straight edges).
     Trapezoidal(TrapezoidalFins),
     /// Elliptical fins (half-ellipse planform).
     Elliptical(EllipticalFins),
+    /// Free-form fins (planform polygon).
+    Freeform(FreeformFins),
 }
 
 impl From<TrapezoidalFins> for FinSet {
@@ -150,6 +170,12 @@ impl From<TrapezoidalFins> for FinSet {
 impl From<EllipticalFins> for FinSet {
     fn from(fins: EllipticalFins) -> Self {
         Self::Elliptical(fins)
+    }
+}
+
+impl From<FreeformFins> for FinSet {
+    fn from(fins: FreeformFins) -> Self {
+        Self::Freeform(fins)
     }
 }
 
@@ -292,52 +318,122 @@ impl RocketGeometry {
             FinSet::Elliptical(f) => {
                 const DIVISIONS: usize = 48;
                 let (cr, s) = (f.root_chord_m, f.span_m);
-                let dy = s / (DIVISIONS - 1) as f64;
-                let mut area = 0.0;
-                let mut mac_num = 0.0;
-                let mut lead_num = 0.0;
-                let mut cos_mid = 0.0;
-                let mut cos_le = 0.0;
-                let mut previous: Option<(f64, f64)> = None;
-                for i in 0..DIVISIONS {
-                    let y = i as f64 * dy;
-                    let t = (y / s).min(1.0);
+                let mut strips = [(0.0, 0.0); DIVISIONS];
+                for (i, strip) in strips.iter_mut().enumerate() {
+                    let t = (i as f64 * s / (DIVISIONS - 1) as f64 / s).min(1.0);
                     let arc = (1.0 - t * t).max(0.0).sqrt();
                     let lead = cr / 2.0 * (1.0 - arc);
-                    let chord = cr * arc;
-                    let mid = cr / 2.0;
-                    area += chord * dy;
-                    mac_num += chord * chord * dy;
-                    lead_num += lead * chord * dy;
-                    if let Some((prev_mid, prev_lead)) = previous {
-                        let hypot_mid = dy.hypot(mid - prev_mid);
-                        if hypot_mid > 0.0 {
-                            cos_mid += dy / hypot_mid;
-                        }
-                        let hypot_lead = dy.hypot(lead - prev_lead);
-                        if hypot_lead > 0.0 {
-                            cos_le += dy / hypot_lead;
-                        }
-                    }
-                    previous = Some((mid, lead));
+                    *strip = (lead, lead + cr * arc);
                 }
-                cos_mid /= (DIVISIONS - 1) as f64;
-                cos_le /= (DIVISIONS - 1) as f64;
+                let (area, mac, mac_lead, cos_mid, cos_le) = Self::strips_planform(s, &strips);
                 Planform {
                     count: f.count,
                     root_chord_m: cr,
                     span_m: s,
                     thickness_m: f.thickness_m,
                     area_m2: area,
-                    mac_m: mac_num / area,
-                    mac_lead_m: lead_num / area,
+                    mac_m: mac,
+                    mac_lead_m: mac_lead,
                     cos_midchord: cos_mid,
                     cos_leading_edge: cos_le,
                     cg_x_m: cr / 2.0,
                     cg_y_m: 4.0 * s / (3.0 * std::f64::consts::PI),
                 }
             }
+            FinSet::Freeform(f) => {
+                const DIVISIONS: usize = 48;
+                let points = &f.points[..f.point_count];
+                let span = points.iter().map(|p| p.1).fold(0.0_f64, f64::max);
+                let dy = span / (DIVISIONS - 1).max(1) as f64;
+                let mut strips = [(f64::INFINITY, f64::NEG_INFINITY); DIVISIONS];
+                for i in 0..points.len() {
+                    let ((x1, y1), (x2, y2)) = (points[i], points[(i + 1) % points.len()]);
+                    if (y2 - y1).abs() < 1e-12 {
+                        let strip = ((y1 / dy).round() as usize).min(DIVISIONS - 1);
+                        strips[strip].0 = strips[strip].0.min(x1.min(x2));
+                        strips[strip].1 = strips[strip].1.max(x1.max(x2));
+                        continue;
+                    }
+                    let (lo, hi) = if y1 < y2 { (y1, y2) } else { (y2, y1) };
+                    let first = ((lo / dy).ceil() as i32).clamp(0, DIVISIONS as i32 - 1) as usize;
+                    let last = ((hi / dy).floor() as i32).clamp(0, DIVISIONS as i32 - 1) as usize;
+                    for (i, strip) in strips.iter_mut().enumerate().take(last + 1).skip(first) {
+                        let y = i as f64 * dy;
+                        let x = x1 + (y - y1) * (x2 - x1) / (y2 - y1);
+                        strip.0 = strip.0.min(x);
+                        strip.1 = strip.1.max(x);
+                    }
+                }
+                let root_chord = (strips[0].1 - strips[0].0).max(0.0);
+                let strips: Vec<(f64, f64)> = strips
+                    .iter()
+                    .map(|&(lo, hi)| if hi >= lo { (lo, hi) } else { (0.0, 0.0) })
+                    .collect();
+                let (area, mac, mac_lead, cos_mid, cos_le) = Self::strips_planform(span, &strips);
+                // Polygon centroid (shoelace formula) for the mass model.
+                let (mut cross_sum, mut cx_sum, mut cy_sum) = (0.0, 0.0, 0.0);
+                for i in 0..points.len() {
+                    let ((x1, y1), (x2, y2)) = (points[i], points[(i + 1) % points.len()]);
+                    let cross = x1 * y2 - x2 * y1;
+                    cross_sum += cross;
+                    cx_sum += (x1 + x2) * cross;
+                    cy_sum += (y1 + y2) * cross;
+                }
+                let signed = cross_sum / 2.0;
+                Planform {
+                    count: f.count,
+                    root_chord_m: root_chord,
+                    span_m: span,
+                    thickness_m: f.thickness_m,
+                    area_m2: area,
+                    mac_m: mac,
+                    mac_lead_m: mac_lead,
+                    cos_midchord: cos_mid,
+                    cos_leading_edge: cos_le,
+                    cg_x_m: cx_sum / (6.0 * signed),
+                    cg_y_m: cy_sum / (6.0 * signed),
+                }
+            }
         }
+    }
+
+    /// Accumulate planform properties from per-strip (lead, trail) chord
+    /// bounds: OpenRocket's FinSetCalc.calculateFinGeometry loop.
+    /// Returns (area, mac, mac_lead, cos_midchord, cos_leading_edge).
+    fn strips_planform(span: f64, strips: &[(f64, f64)]) -> (f64, f64, f64, f64, f64) {
+        let dy = span / (strips.len() - 1) as f64;
+        let mut area = 0.0;
+        let mut mac_num = 0.0;
+        let mut lead_num = 0.0;
+        let mut cos_mid = 0.0;
+        let mut cos_le = 0.0;
+        let mut previous: Option<(f64, f64)> = None;
+        for &(lead, trail) in strips {
+            let chord = (trail - lead).max(0.0);
+            let mid = (lead + trail) / 2.0;
+            area += chord * dy;
+            mac_num += chord * chord * dy;
+            lead_num += lead * chord * dy;
+            if let Some((prev_mid, prev_lead)) = previous {
+                let hypot_mid = dy.hypot(mid - prev_mid);
+                if hypot_mid > 0.0 {
+                    cos_mid += dy / hypot_mid;
+                }
+                let hypot_lead = dy.hypot(lead - prev_lead);
+                if hypot_lead > 0.0 {
+                    cos_le += dy / hypot_lead;
+                }
+            }
+            previous = Some((mid, lead));
+        }
+        let n = (strips.len() - 1) as f64;
+        (
+            area,
+            mac_num / area,
+            lead_num / area,
+            cos_mid / n,
+            cos_le / n,
+        )
     }
 
     #[cfg(test)]
@@ -821,10 +917,28 @@ impl RocketGeometry {
         } else {
             1.0 / (1.5 * reynolds.ln() - 5.6).powi(2)
         };
-        let cf_rough = 0.032 * rough_ratio.powf(0.2);
-        // Fully turbulent: take the larger of the smooth and roughness-limited
-        // coefficients, then the subsonic compressibility correction.
-        let cf = cf_turbulent.max(cf_rough) * (1.0 - 0.1 * mach * mach);
+        // OpenRocket's fully-turbulent compressibility corrections, smooth
+        // and roughness-limited branches separately (the smooth supersonic
+        // form is (1 + 0.15M²)^(−0.58), the rough one 1/(1 + 0.18M²)).
+        let blend = |low: f64, high: f64| {
+            if mach < 0.9 {
+                low
+            } else if mach > 1.1 {
+                high
+            } else {
+                high * (mach - 0.9) / 0.2 + low * (1.1 - mach) / 0.2
+            }
+        };
+        let cf_smooth = cf_turbulent
+            * blend(
+                1.0 - 0.1 * mach * mach,
+                (1.0 + 0.15 * mach * mach).powf(-0.58),
+            );
+        let cf_rough = 0.032
+            * rough_ratio.powf(0.2)
+            * blend(1.0 - 0.1 * mach * mach, 1.0 / (1.0 + 0.18 * mach * mach));
+        // Fully turbulent: take the larger of the two corrected coefficients.
+        let cf = cf_smooth.max(cf_rough);
         let r = self.max_diameter_m() / 2.0;
         let fineness = length / r;
         let correction = 1.0 + 1.0 / (2.0 * fineness);
@@ -899,10 +1013,12 @@ impl RocketGeometry {
 
 /// Parse the compact geometry spec used by the CLI:
 /// `nose=shape:length:diameter,tube=length:diameter,fins=count:root:tip:span:sweep:thickness`
-/// (or `efins=count:root:span:thickness` for elliptical fins), with an
-/// optional `boat=length:fore_diameter:aft_diameter` conical boat-tail at
-/// the aft end. The fin thickness is optional (default 2 mm). Lengths are
-/// in metres.
+/// (or `efins=count:root:span:thickness` for elliptical fins, or
+/// `ffins=count:x1y1+x2y2+...:thickness` for a free-form planform polygon
+/// whose first and last vertices lie on the body), with an optional
+/// `boat=length:fore_diameter:aft_diameter` conical boat-tail at the aft
+/// end. The fin thickness is optional (default 2 mm). Lengths are in
+/// metres.
 pub fn parse_geometry(spec: &str) -> Result<RocketGeometry> {
     let mut nose = None;
     let mut tube = None;
@@ -979,6 +1095,59 @@ pub fn parse_geometry(spec: &str) -> Result<RocketGeometry> {
                         root_chord_m: number(1)?,
                         span_m: number(2)?,
                         thickness_m: if parts.len() == 4 { number(3)? } else { 0.002 },
+                    }
+                    .into(),
+                );
+            }
+            "ffins" => {
+                if !(2..=3).contains(&parts.len()) {
+                    return Err(Error::invalid(
+                        "ffins",
+                        "expected count:x1y1+x2y2+...[:thickness] (x and y in metres)",
+                    ));
+                }
+                let count: u32 = parts[0]
+                    .parse()
+                    .map_err(|_| Error::invalid("fin count", "must be an integer"))?;
+                let mut points = [(0.0, 0.0); 16];
+                let mut point_count = 0usize;
+                for pair in parts[1].split('+') {
+                    if point_count >= 16 {
+                        return Err(Error::invalid("ffins", "at most 16 vertices"));
+                    }
+                    let (xs, ys) = pair.split_once('x').ok_or_else(|| {
+                        Error::invalid(
+                            "ffins",
+                            "vertices as xVAL yVAL pairs, e.g. 0x0+0.05x0+0.02x0.05",
+                        )
+                    })?;
+                    let x: f64 = xs
+                        .parse()
+                        .map_err(|_| Error::invalid("ffins", "non-numeric vertex x"))?;
+                    let y: f64 = ys
+                        .parse()
+                        .map_err(|_| Error::invalid("ffins", "non-numeric vertex y"))?;
+                    if !x.is_finite() || !y.is_finite() || y < 0.0 {
+                        return Err(Error::invalid(
+                            "ffins",
+                            "vertices must be finite with y >= 0",
+                        ));
+                    }
+                    points[point_count] = (x, y);
+                    point_count += 1;
+                }
+                if point_count < 3 || points[0].1 != 0.0 || points[point_count - 1].1 != 0.0 {
+                    return Err(Error::invalid(
+                        "ffins",
+                        "need at least 3 vertices, first and last on the body (y = 0)",
+                    ));
+                }
+                fins = Some(
+                    FreeformFins {
+                        count,
+                        points,
+                        point_count,
+                        thickness_m: if parts.len() == 3 { number(2)? } else { 0.002 },
                     }
                     .into(),
                 );
@@ -1397,6 +1566,62 @@ mod tests {
             "{} vs {expected}",
             props.pitch_inertia_kg_m2
         );
+    }
+
+    #[test]
+    fn freeform_trapezoid_matches_the_closed_form() {
+        // The example trapezoid as a free-form polygon must reproduce the
+        // closed-form planform within the strip discretization (~2%).
+        let trap = example();
+        let mut points = [(0.0, 0.0); 16];
+        points[0] = (0.0, 0.0);
+        points[1] = (0.02, 0.04);
+        points[2] = (0.05, 0.04);
+        points[3] = (0.05, 0.0);
+        let free = RocketGeometry::new(
+            trap.nose,
+            trap.tube,
+            FreeformFins {
+                count: 3,
+                points,
+                point_count: 4,
+                thickness_m: 0.002,
+            },
+        );
+        let (a, b) = (trap.planform(), free.planform());
+        for (name, x, y) in [
+            ("area", a.area_m2, b.area_m2),
+            ("mac", a.mac_m, b.mac_m),
+            ("mac_lead", a.mac_lead_m, b.mac_lead_m),
+            ("cos_midchord", a.cos_midchord, b.cos_midchord),
+            ("cos_leading_edge", a.cos_leading_edge, b.cos_leading_edge),
+            ("cg_x", a.cg_x_m, b.cg_x_m),
+            ("cg_y", a.cg_y_m, b.cg_y_m),
+        ] {
+            // The rectangular strip sum (OpenRocket's own discretization)
+            // differs from the closed form by ~2% on small fins.
+            assert!(
+                (x - y).abs() / x.max(1e-9) < 0.03,
+                "{name}: closed {x} vs freeform {y}"
+            );
+        }
+        // Same airframe-level numbers, not just the planform.
+        let (ta, fa) = (trap.analyze(), free.analyze());
+        assert!((ta.cna_vs_mach[0].1 - fa.cna_vs_mach[0].1).abs() / ta.cna_vs_mach[0].1 < 0.03);
+        assert!((ta.cp_vs_mach[0].1 - fa.cp_vs_mach[0].1).abs() / ta.cp_vs_mach[0].1 < 0.03);
+        // Parse end to end and validation.
+        let parsed = parse_geometry(
+            "nose=conical:0.1:0.024,tube=0.4:0.024,ffins=3:0x0+0.02x0.04+0.05x0.04+0.05x0:0.002",
+        )
+        .unwrap();
+        assert!(matches!(parsed.fins, FinSet::Freeform(_)));
+        assert!(
+            parse_geometry("nose=conical:0.1:0.024,tube=0.4:0.024,ffins=3:0x0+0.05x0").is_err()
+        );
+        assert!(parse_geometry(
+            "nose=conical:0.1:0.024,tube=0.4:0.024,ffins=3:0x0.01+0.05x0+0.02x0.05"
+        )
+        .is_err());
     }
 
     #[test]

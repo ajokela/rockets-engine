@@ -196,6 +196,29 @@ function renderChart(rows) {
   screen.scrollTop = screen.scrollHeight;
 }
 
+function runLine(line) {
+  print('rockets$ ' + line, 'echo');
+  if (line === 'clear') { screen.innerHTML = ''; return; }
+  history.push(line);
+  cursor = history.length;
+  if (!engine) { print('engine is not loaded', 'err'); return; }
+  const isSim = /^(simulate|sim)(\s|$)/.test(line);
+  const wantsPlot = isSim && /(^|\s)--plot(?=\s|$)/.test(line);
+  const textLine = wantsPlot ? line.replace(/(^|\s)--plot(?=\s|$)/g, '$1').trim() : line;
+  try {
+    print(engine.runCommand(textLine));
+    if (wantsPlot) {
+      const jsonLine = /--format\s+\S+/.test(textLine)
+        ? textLine.replace(/--format\s+\S+/, '--format json')
+        : textLine + ' --format json';
+      const rows = JSON.parse(engine.runCommand(jsonLine));
+      renderChart(rows);
+    }
+  } catch (err) {
+    print(String(err), 'err');
+  }
+}
+
 input.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowUp') {
     e.preventDefault();
@@ -208,28 +231,14 @@ input.addEventListener('keydown', (e) => {
     const line = input.value.trim();
     input.value = '';
     if (!line) return;
-    print('rockets$ ' + line, 'echo');
-    if (line === 'clear') { screen.innerHTML = ''; return; }
-    history.push(line);
-    cursor = history.length;
-    if (!engine) { print('engine is not loaded', 'err'); return; }
-    const isSim = /^(simulate|sim)(\s|$)/.test(line);
-    const wantsPlot = isSim && /(^|\s)--plot(?=\s|$)/.test(line);
-    const textLine = wantsPlot ? line.replace(/(^|\s)--plot(?=\s|$)/g, '$1').trim() : line;
-    try {
-      print(engine.runCommand(textLine));
-      if (wantsPlot) {
-        const jsonLine = /--format\s+\S+/.test(textLine)
-          ? textLine.replace(/--format\s+\S+/, '--format json')
-          : textLine + ' --format json';
-        const rows = JSON.parse(engine.runCommand(jsonLine));
-        renderChart(rows);
-      }
-    } catch (err) {
-      print(String(err), 'err');
-    }
+    runLine(line);
   }
 });
+
+// Deep link: /sh/?cmd=<urlencoded command> runs once on load (used by the
+// geometry builder on the landing page).
+const preset = new URLSearchParams(location.search).get('cmd');
+if (preset) runLine(preset);
 
 document.getElementById('screen').addEventListener('click', () => input.focus());
 for (const button of document.querySelectorAll('#examples button')) {

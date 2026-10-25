@@ -92,6 +92,36 @@
   .code .m { color: #c792ea; }           /* macros */
   .code .n { color: #f2b86b; }           /* numbers */
   .code .c { color: #5b6b80; }           /* comments */
+  .geoform .geogrid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 10px 16px;
+    margin: 12px 0 16px;
+  }
+  .geoform label {
+    color: var(--dim);
+    font-size: 0.85rem;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .geoform input, .geoform select {
+    background: var(--panel);
+    border: 1px solid var(--edge);
+    border-radius: 6px;
+    color: var(--text);
+    font: 0.95rem var(--mono);
+    padding: 6px 8px;
+    width: 100%;
+  }
+  .geoform input:focus, .geoform select:focus { border-color: var(--accent); outline: none; }
+  .runlink {
+    color: var(--accent2);
+    font-family: var(--mono);
+    text-decoration: none;
+    border-bottom: 1px dashed var(--accent2);
+  }
+  .runlink:hover { color: var(--accent); border-color: var(--accent); }
   .code .s { color: #9ece6a; }           /* strings */
   .code-note { color: var(--dim); font-size: 0.85rem; margin-top: 8px; }
   .code-note a { color: var(--accent2); text-decoration: none; }
@@ -112,7 +142,7 @@
 <body>
 <main>
   <header>
-    <h1>rockets-engine <span class="ver">v0.14.0</span></h1>
+    <h1>rockets-engine <span class="ver">v0.15.0</span></h1>
     <p class="tagline">Point-mass powered flight for Rust — prescribed motor burns, staging and guidance hooks on the ballistics-engine force kernel.</p>
     <svg class="rocket-arc" viewBox="0 0 780 170" aria-hidden="true">
       <path id="flight" class="trail" d="M -50 160 Q 390 -80 830 160" fill="none" stroke-width="1.5"/>
@@ -129,7 +159,7 @@
     </svg>
   </header>
 
-  <div class="install"><span class="p"># Cargo.toml</span><br>rockets-engine = "0.14"</div>
+  <div class="install"><span class="p"># Cargo.toml</span><br>rockets-engine = "0.15"</div>
 
   <h2>What it does</h2>
   <ul>
@@ -185,7 +215,7 @@
     }
     <span class="t">Ok</span>(())
 }</code></pre>
-  <p class="code-note">In Cargo.toml: <code>rockets-engine = "0.14"</code>; add <code>ballistics-engine = "=0.48.0"</code> only if you call its API directly. Full source: <a href="https://github.com/ajokela/rockets-engine/blob/main/examples/with_ballistics.rs">examples/with_ballistics.rs</a>. Flying something unpowered? Drive <a href="https://docs.rs/ballistics-engine">ballistics-engine</a> directly instead.</p>
+  <p class="code-note">In Cargo.toml: <code>rockets-engine = "0.15"</code>; add <code>ballistics-engine = "=0.48.0"</code> only if you call its API directly. Full source: <a href="https://github.com/ajokela/rockets-engine/blob/main/examples/with_ballistics.rs">examples/with_ballistics.rs</a>. Flying something unpowered? Drive <a href="https://docs.rs/ballistics-engine">ballistics-engine</a> directly instead.</p>
 
   <h2>Model a rocket from geometry</h2>
   <p>Describe the airframe instead of guessing curves. The Barrowman modeler turns nose, tube and fin geometry into Cd/Cnα/CP, the weathercock uses CP/CG for stability, and the recovery model brings it home. One command exercises the whole stack:</p>
@@ -195,6 +225,44 @@
   <span class="m">--geometry-masses</span> <span class="n">0.012,0.020,0.006</span> \
   <span class="m">--weathercock</span> <span class="m">--recover</span> <span class="n">0.25</span> <span class="m">--plot</span></code></pre>
   <p class="code-note"><code>--motor</code> picks a built-in NAR-data curve (estes:a8, b6, c6, d12 and aerotech:g80 today); <code>--motor-eng</code> takes any RASP .eng text pasted inline (<code>\n</code> escapes mark its line breaks for single-line terminals), and <code>--motor-file</code> reads one from disk. <code>--geometry</code> is <code>nose=shape:length:diameter,tube=length:diameter,fins=count:root:tip:span:sweep:thickness</code>, in metres. <code>--geometry-masses</code> is the nose, tube and fin mass in kg — from those the engine works out the dry mass (adding the motor casing), the dry CG, the propellant CG and the pitch inertia, so there is nothing left to guess. <code>--weathercock</code> turns on second-order stability dynamics; <code>--recover</code> is the parachute's Cd·A in m². The real D12 has 16.9 N·s of total impulse and reaches about 550 m on the 58 g airframe. Launch elevation defaults to 90° (straight up); add <code>--elevation-deg</code> for angled flights. Try it in <a href="/sh/">the browser terminal</a> — the examples row covers every feature in the engine, from staging and gravity turns to Monte-Carlo dispersion and elevation solving.</p>
+
+  <h2>Build your own</h2>
+  <p>Describe the rocket; the form writes the command. Then run it in the terminal:</p>
+  <form id="geoform" class="geoform">
+    <div class="geogrid">
+      <label>nose shape
+        <select id="g-shape">
+          <option>conical</option>
+          <option selected>ogive</option>
+          <option>elliptical</option>
+          <option>parabolic</option>
+        </select></label>
+      <label>nose length (m) <input id="g-nl" type="number" step="0.005" min="0.005" value="0.070"></label>
+      <label>nose dia (m) <input id="g-nd" type="number" step="0.001" min="0.005" value="0.024"></label>
+      <label>tube length (m) <input id="g-tl" type="number" step="0.01" min="0.01" value="0.200"></label>
+      <label>tube dia (m) <input id="g-td" type="number" step="0.001" min="0.005" value="0.024"></label>
+      <label>fin count <input id="g-fc" type="number" step="1" min="1" max="12" value="3"></label>
+      <label>fin root (m) <input id="g-fr" type="number" step="0.005" min="0.005" value="0.050"></label>
+      <label>fin tip (m) <input id="g-ft" type="number" step="0.005" min="0.001" value="0.030"></label>
+      <label>fin span (m) <input id="g-fs" type="number" step="0.005" min="0.005" value="0.050"></label>
+      <label>fin sweep (m) <input id="g-fw" type="number" step="0.005" min="0" value="0.020"></label>
+      <label>fin thickness (m) <input id="g-fk" type="number" step="0.0002" min="0.0005" value="0.0032"></label>
+      <label>nose mass (kg) <input id="g-mn" type="number" step="0.001" min="0.001" value="0.00427"></label>
+      <label>tube mass (kg) <input id="g-mt" type="number" step="0.001" min="0.001" value="0.00741"></label>
+      <label>fins mass (kg) <input id="g-mf" type="number" step="0.001" min="0" value="0.01306"></label>
+      <label>motor
+        <select id="g-motor">
+          <option selected>estes:d12</option>
+          <option>estes:c6</option>
+          <option>estes:b6</option>
+          <option>estes:a8</option>
+          <option>aerotech:g80</option>
+        </select></label>
+      <label>parachute Cd·A (m²) <input id="g-rec" type="number" step="0.05" min="0.01" value="0.25"></label>
+    </div>
+  </form>
+  <pre class="code"><code id="g-cmd"></code></pre>
+  <p><a id="g-run" class="runlink" href="#">run it in the terminal →</a></p>
 
   <h2>Get it</h2>
   <div class="links">
@@ -208,5 +276,31 @@
     Built on <a href="https://crates.io/crates/ballistics-engine">ballistics-engine</a> · MIT licensed
   </footer>
 </main>
+<script>
+(function () {
+  const ids = ['shape','nl','nd','tl','td','fc','fr','ft','fs','fw','fk','mn','mt','mf','motor','rec'];
+  const el = Object.fromEntries(ids.map(id => [id, document.getElementById('g-' + id)]));
+  const num = (x, digits) => {
+    const v = Number(x);
+    return String(digits === undefined ? v : Number(v.toFixed(digits)));
+  };
+  function build() {
+    const geometry =
+      'nose=' + el.shape.value + ':' + num(el.nl.value, 3) + ':' + num(el.nd.value, 3) +
+      ',tube=' + num(el.tl.value, 3) + ':' + num(el.td.value, 3) +
+      ',fins=' + el.fc.value + ':' + num(el.fr.value, 3) + ':' + num(el.ft.value, 3) + ':' +
+        num(el.fs.value, 3) + ':' + num(el.fw.value, 3) + ':' + num(el.fk.value, 4);
+    const masses = num(el.mn.value, 5) + ',' + num(el.mt.value, 5) + ',' + num(el.mf.value, 5);
+    const cmd = 'simulate --motor ' + el.motor.value +
+      ' --geometry ' + geometry +
+      ' --geometry-masses ' + masses +
+      ' --weathercock --recover ' + num(el.rec.value, 3) + ' --plot';
+    document.getElementById('g-cmd').textContent = cmd;
+    document.getElementById('g-run').href = '/sh/?cmd=' + encodeURIComponent(cmd);
+  }
+  ids.forEach(id => el[id].addEventListener('input', build));
+  build();
+})();
+</script>
 </body>
 </html>

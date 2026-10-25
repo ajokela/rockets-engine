@@ -29,7 +29,7 @@ finish / no launch lug):
 | --- | --- | --- | --- | --- |
 | A8 (9 N·s) | subsonic, max Mach 0.42 | 409.64 m | 390.11 m | −4.8 % |
 | D21 (32 N·s) | transonic, max Mach 0.85 | 697.02 m | 678.12 m | −2.7 % |
-| G64 (128 N·s, synthetic) | supersonic, max Mach 1.60 | 1112.14 m | 1081.08 m | −2.8 % |
+| G64 (128 N·s, synthetic) | supersonic, max Mach 1.60 | 1112.14 m | 1085.71 m | −2.4 % |
 
 The G64 motor is synthetic by design: parity needs identical inputs, not a
 real motor file. It exists to push the Alpha III airframe past Mach 1.
@@ -75,9 +75,11 @@ motor's casing (A8 13.1 g, D21 15.4 g).
 
 ## Known remaining differences
 
-- Elliptical and parabolic nose wave drag (NASA TR-R-100 tables) is not
-  modelled past Mach 1; conical and ogive noses are (the ogive's wave drag
-  is ~zero anyway, since its base surface is nearly axial).
-- Skin-friction compressibility and the exact transonic interpolator
-  details account for the remaining few percent.
+- Fin-body interference drag: none on either side. Niskanen's thesis
+  explicitly ignores it "as small compared to the other sources" — earlier
+  revisions of this note wrongly listed it as a gap on our side.
+- Skin friction matches OpenRocket's fully-turbulent branch exactly
+  (Schoenherr Cf, roughness limit, and the c1/c2 compressibility blends);
+  the residual few percent is the transonic interpolator details and
+  atmosphere-table differences.
 
