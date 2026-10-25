@@ -1,15 +1,15 @@
 //! Geometry-to-aerodynamics: a Barrowman subset for slender model rockets
-//! (nose cone + body tube + trapezoidal fins), implemented against the
-//! OpenRocket technical documentation and its `FinSetCalc` and
-//! `SymmetricComponentCalc` sources. CP comes from the component moment sum
-//! (with the supersonic aft shift); drag is friction + base + nose wave drag
-//! + rounded-fin form drag. The fin normal-force slope uses Diederich below Mach 1, the Busemann K1 term above Mach 1.5, and OpenRocket's Hermite join between them.
+//! (nose cone + body tube + fin set + optional conical boat-tail),
+//! implemented against the OpenRocket technical documentation and its
+//! `FinSetCalc` and `SymmetricComponentCalc` sources. CP comes from the
+//! component moment sum (with the supersonic aft shift); drag is friction +
+//! base + nose wave drag + rounded-fin form drag. The fin normal-force slope uses Diederich below Mach 1, the Busemann K1 term above Mach 1.5, and OpenRocket's Hermite join between them.
 //!
 //! Induced drag from angle of attack uses the normal-force tilt model
-//! (Cd += Cnα·α²). Not covered (deliberately): boat-tails/transitions,
-//! elliptical or free-form fins, fin-body interference drag, and wave drag
-//! of elliptical/parabolic noses past Mach 1 (conical and ogive are fully
-//! modelled).
+//! (Cd += Cnα·α²). Fin planforms are trapezoidal (closed form) or
+//! half-ellipse (OpenRocket's 48-strip integration). Not covered
+//! (deliberately): forward shoulders or multi-diameter bodies, free-form
+//! fins, and fin-body interference drag.
 
 use crate::{Error, Result};
 
@@ -117,16 +117,68 @@ pub struct BoatTail {
     pub aft_diameter_m: f64,
 }
 
-/// A slender rocket: nose cone, body tube, trapezoidal fin set and an
-/// optional conical boat-tail.
+/// Identical elliptical fins (half-ellipse planform) at the aft end of the
+/// tube. Geometry follows OpenRocket's EllipticalFinSet: root chord along
+/// the body, tip point mid-chord at the span.
+#[derive(Debug, Clone, Copy)]
+pub struct EllipticalFins {
+    /// Number of identical fins.
+    pub count: u32,
+    /// Fin root chord in metres.
+    pub root_chord_m: f64,
+    /// Fin semispan in metres (body surface to tip).
+    pub span_m: f64,
+    /// Fin thickness in metres.
+    pub thickness_m: f64,
+}
+
+/// The fin-set planform family.
+#[derive(Debug, Clone, Copy)]
+pub enum FinSet {
+    /// Trapezoidal fins (straight edges).
+    Trapezoidal(TrapezoidalFins),
+    /// Elliptical fins (half-ellipse planform).
+    Elliptical(EllipticalFins),
+}
+
+impl From<TrapezoidalFins> for FinSet {
+    fn from(fins: TrapezoidalFins) -> Self {
+        Self::Trapezoidal(fins)
+    }
+}
+
+impl From<EllipticalFins> for FinSet {
+    fn from(fins: EllipticalFins) -> Self {
+        Self::Elliptical(fins)
+    }
+}
+
+/// Single-fin planform geometry shared by the fin models.
+#[derive(Debug, Clone, Copy)]
+struct Planform {
+    count: u32,
+    root_chord_m: f64,
+    span_m: f64,
+    thickness_m: f64,
+    area_m2: f64,
+    mac_m: f64,
+    mac_lead_m: f64,
+    cos_midchord: f64,
+    cos_leading_edge: f64,
+    cg_x_m: f64,
+    cg_y_m: f64,
+}
+
+/// A slender rocket: nose cone, body tube, fin set and an optional conical
+/// boat-tail.
 #[derive(Debug, Clone, Copy)]
 pub struct RocketGeometry {
     /// Nose cone.
     pub nose: NoseCone,
     /// Cylindrical body tube.
     pub tube: BodyTube,
-    /// Aft trapezoidal fin set.
-    pub fins: TrapezoidalFins,
+    /// Aft fin set.
+    pub fins: FinSet,
     /// Optional conical boat-tail aft of the fins.
     pub boat_tail: Option<BoatTail>,
     /// Roughness height in metres (default 20 µm, painted surface).
@@ -158,11 +210,11 @@ const PARABOLIC_TABLE: &[(f64, f64)] = &[
 
 impl RocketGeometry {
     /// Build with the default painted-surface roughness (20 µm).
-    pub fn new(nose: NoseCone, tube: BodyTube, fins: TrapezoidalFins) -> Self {
+    pub fn new(nose: NoseCone, tube: BodyTube, fins: impl Into<FinSet>) -> Self {
         Self {
             nose,
             tube,
-            fins,
+            fins: fins.into(),
             boat_tail: None,
             roughness_m: 20e-6,
         }
@@ -212,14 +264,85 @@ impl RocketGeometry {
         std::f64::consts::FRAC_PI_4 * self.max_diameter_m().powi(2)
     }
 
-    fn fin_area(&self) -> f64 {
-        self.fins.span_m * (self.fins.root_chord_m + self.fins.tip_chord_m) / 2.0
+    /// Single-fin planform geometry, shared by the fin models. Trapezoids
+    /// use the closed forms; ellipses use OpenRocket's 48-strip integration
+    /// (FinSetCalc.calculateFinGeometry) over the half-ellipse boundary.
+    fn planform(&self) -> Planform {
+        match self.fins {
+            FinSet::Trapezoidal(f) => {
+                let (cr, ct, s, m) = (f.root_chord_m, f.tip_chord_m, f.span_m, f.leading_sweep_m);
+                let area = s * (cr + ct) / 2.0;
+                let mac = (2.0 / 3.0) * (cr + ct - cr * ct / (cr + ct));
+                let y_mac = (s / 3.0) * (cr + 2.0 * ct) / (cr + ct);
+                let gamma_mid = ((m + ct / 2.0 - cr / 2.0) / s).atan();
+                Planform {
+                    count: f.count,
+                    root_chord_m: cr,
+                    span_m: s,
+                    thickness_m: f.thickness_m,
+                    area_m2: area,
+                    mac_m: mac,
+                    mac_lead_m: m * y_mac / s,
+                    cos_midchord: gamma_mid.cos(),
+                    cos_leading_edge: s / (s * s + m * m).sqrt(),
+                    cg_x_m: (cr * cr + cr * ct + ct * ct + m * (cr + 2.0 * ct)) / (3.0 * (cr + ct)),
+                    cg_y_m: y_mac,
+                }
+            }
+            FinSet::Elliptical(f) => {
+                const DIVISIONS: usize = 48;
+                let (cr, s) = (f.root_chord_m, f.span_m);
+                let dy = s / (DIVISIONS - 1) as f64;
+                let mut area = 0.0;
+                let mut mac_num = 0.0;
+                let mut lead_num = 0.0;
+                let mut cos_mid = 0.0;
+                let mut cos_le = 0.0;
+                let mut previous: Option<(f64, f64)> = None;
+                for i in 0..DIVISIONS {
+                    let y = i as f64 * dy;
+                    let t = (y / s).min(1.0);
+                    let arc = (1.0 - t * t).max(0.0).sqrt();
+                    let lead = cr / 2.0 * (1.0 - arc);
+                    let chord = cr * arc;
+                    let mid = cr / 2.0;
+                    area += chord * dy;
+                    mac_num += chord * chord * dy;
+                    lead_num += lead * chord * dy;
+                    if let Some((prev_mid, prev_lead)) = previous {
+                        let hypot_mid = dy.hypot(mid - prev_mid);
+                        if hypot_mid > 0.0 {
+                            cos_mid += dy / hypot_mid;
+                        }
+                        let hypot_lead = dy.hypot(lead - prev_lead);
+                        if hypot_lead > 0.0 {
+                            cos_le += dy / hypot_lead;
+                        }
+                    }
+                    previous = Some((mid, lead));
+                }
+                cos_mid /= (DIVISIONS - 1) as f64;
+                cos_le /= (DIVISIONS - 1) as f64;
+                Planform {
+                    count: f.count,
+                    root_chord_m: cr,
+                    span_m: s,
+                    thickness_m: f.thickness_m,
+                    area_m2: area,
+                    mac_m: mac_num / area,
+                    mac_lead_m: lead_num / area,
+                    cos_midchord: cos_mid,
+                    cos_leading_edge: cos_le,
+                    cg_x_m: cr / 2.0,
+                    cg_y_m: 4.0 * s / (3.0 * std::f64::consts::PI),
+                }
+            }
+        }
     }
 
-    /// Mean aerodynamic chord of one fin (trapezoid formula).
-    fn mac(&self) -> f64 {
-        let (cr, ct) = (self.fins.root_chord_m, self.fins.tip_chord_m);
-        (2.0 / 3.0) * (cr + ct - cr * ct / (cr + ct))
+    #[cfg(test)]
+    fn fin_area(&self) -> f64 {
+        self.planform().area_m2
     }
 
     /// Fin CP as a fraction of the MAC: quarter-chord at M ≤ 0.5, the
@@ -230,7 +353,8 @@ impl RocketGeometry {
         if mach <= 0.5 {
             return 0.25;
         }
-        let ar = 2.0 * self.fins.span_m.powi(2) / self.fin_area();
+        let planform = self.planform();
+        let ar = 2.0 * planform.span_m.powi(2) / planform.area_m2;
         let supersonic = |m: f64| {
             let beta = (m * m - 1.0).sqrt();
             (ar * beta - 0.67) / (2.0 * ar * beta - 1.0)
@@ -244,30 +368,16 @@ impl RocketGeometry {
 
     /// Fin CP measured from the fin's root leading edge.
     fn fin_cp(&self, mach: f64) -> f64 {
-        let (cr, ct, s, m) = (
-            self.fins.root_chord_m,
-            self.fins.tip_chord_m,
-            self.fins.span_m,
-            self.fins.leading_sweep_m,
-        );
-        let y_mac = (s / 3.0) * (cr + 2.0 * ct) / (cr + ct);
-        let x_mac_le = m * y_mac / s;
-        x_mac_le + self.fin_cp_fraction(mach) * self.mac()
-    }
-
-    /// Cosine of the leading-edge sweep angle.
-    fn leading_edge_cos(&self) -> f64 {
-        let (s, m) = (self.fins.span_m, self.fins.leading_sweep_m);
-        s / (s * s + m * m).sqrt()
+        let planform = self.planform();
+        planform.mac_lead_m + self.fin_cp_fraction(mach) * planform.mac_m
     }
 
     /// Fin pressure (form) drag: OpenRocket's rounded-section model —
     /// a Mach-dependent leading-edge term times cos²(Γ_LE), plus half the
     /// base drag for the trailing edge, scaled by span·thickness / A_ref.
     fn fin_pressure_cd(&self, mach: f64) -> f64 {
-        let span = self.fins.span_m;
-        let thickness = self.fins.thickness_m;
-        if span <= 0.0 || thickness <= 0.0 {
+        let planform = self.planform();
+        if planform.span_m <= 0.0 || planform.thickness_m <= 0.0 {
             return 0.0;
         }
         let leading_edge = if mach < 0.9 {
@@ -278,11 +388,11 @@ impl RocketGeometry {
             let m2 = mach * mach;
             1.214 - 0.502 / m2 + 0.1095 / (m2 * m2)
         };
-        let cos_le = self.leading_edge_cos();
+        let cos_le = planform.cos_leading_edge;
         let cd = leading_edge * cos_le * cos_le + Self::base_cd(mach) / 2.0;
         // OpenRocket instances the fin set per fin; the set's drag is n
         // times the single-fin value.
-        cd * span * thickness / self.ref_area_m2() * self.fins.count as f64
+        cd * planform.span_m * planform.thickness_m / self.ref_area_m2() * planform.count as f64
     }
 
     /// Nose pressure drag per frontal area for conical and tangent-ogive
@@ -387,15 +497,9 @@ impl RocketGeometry {
         a * mach.powf(b) + cd_mach0
     }
 
+    #[cfg(test)]
     fn midchord_cos(&self) -> f64 {
-        let (cr, ct, s, m) = (
-            self.fins.root_chord_m,
-            self.fins.tip_chord_m,
-            self.fins.span_m,
-            self.fins.leading_sweep_m,
-        );
-        let gamma = ((m + ct / 2.0 - cr / 2.0) / s).atan();
-        gamma.cos()
+        self.planform().cos_midchord
     }
 
     /// Cubic Hermite interpolation on [x0, x1] with endpoint values y0, y1
@@ -421,9 +525,10 @@ impl RocketGeometry {
     /// terms vanish for a slope table). Transonic: OpenRocket's cubic
     /// Hermite join with matched endpoint derivatives.
     fn fin_cna1(&self, mach: f64) -> f64 {
-        let span = self.fins.span_m;
-        let area = self.fin_area();
-        let cos = self.midchord_cos();
+        let planform = self.planform();
+        let span = planform.span_m;
+        let area = planform.area_m2;
+        let cos = planform.cos_midchord;
         if area <= 0.0 || span <= 0.0 || cos <= 0.0 {
             return 0.0;
         }
@@ -465,11 +570,11 @@ impl RocketGeometry {
     /// Body-interference factor (1 + tau) with tau = r/(span + r).
     fn interference_tau(&self) -> f64 {
         let r = self.max_diameter_m() / 2.0;
-        r / (self.fins.span_m + r)
+        r / (self.planform().span_m + r)
     }
 
     fn fin_count_factor(&self) -> f64 {
-        match self.fins.count {
+        match self.planform().count {
             5 => 0.948,
             6 => 0.913,
             7 => 0.854,
@@ -490,12 +595,12 @@ impl RocketGeometry {
         self.fin_cna1(mach)
             * (1.0 + self.interference_tau())
             * self.fin_count_factor()
-            * (self.fins.count as f64 / 2.0)
+            * (self.planform().count as f64 / 2.0)
     }
 
     /// Fin CP measured from the nose tip (fin trailing edge at tube end).
     fn fin_cp_abs(&self, mach: f64) -> f64 {
-        self.nose.length_m + self.tube.length_m - self.fins.root_chord_m + self.fin_cp(mach)
+        self.nose.length_m + self.tube.length_m - self.planform().root_chord_m + self.fin_cp(mach)
     }
 
     /// Nose radius profile r(x) with x measured from the tip.
@@ -540,22 +645,12 @@ impl RocketGeometry {
 
     /// Fin planform centroid, measured from the root leading edge.
     fn fin_planform_cg(&self) -> f64 {
-        let (cr, ct, m) = (
-            self.fins.root_chord_m,
-            self.fins.tip_chord_m,
-            self.fins.leading_sweep_m,
-        );
-        (cr * cr + cr * ct + ct * ct + m * (cr + 2.0 * ct)) / (3.0 * (cr + ct))
+        self.planform().cg_x_m
     }
 
     /// Fin centroid height above the body surface.
     fn fin_radial_cg(&self) -> f64 {
-        let (cr, ct, s) = (
-            self.fins.root_chord_m,
-            self.fins.tip_chord_m,
-            self.fins.span_m,
-        );
-        s * (cr + 2.0 * ct) / (3.0 * (cr + ct))
+        self.planform().cg_y_m
     }
 
     /// Combine component masses with the geometry's component CGs into a
@@ -591,7 +686,7 @@ impl RocketGeometry {
         );
         let (nose_cg, nose_inertia) = self.nose_volume_properties();
         let tube_cg = self.nose.length_m + self.tube.length_m / 2.0;
-        let fin_cg = self.nose.length_m + self.tube.length_m - self.fins.root_chord_m
+        let fin_cg = self.nose.length_m + self.tube.length_m - self.planform().root_chord_m
             + self.fin_planform_cg();
         let mut parts: Vec<(f64, f64, f64)> = vec![
             (nose_kg, nose_cg, nose_kg * nose_inertia),
@@ -748,8 +843,9 @@ impl RocketGeometry {
             .lateral_area(self.nose.length_m, self.nose.diameter_m)
             + std::f64::consts::PI * self.tube.diameter_m * self.tube.length_m
             + boat_wet;
-        let fin_wet = 2.0 * self.fins.count as f64 * self.fin_area();
-        let thickness_factor = 1.0 + 2.0 * self.fins.thickness_m / self.mac();
+        let planform = self.planform();
+        let fin_wet = 2.0 * planform.count as f64 * planform.area_m2;
+        let thickness_factor = 1.0 + 2.0 * planform.thickness_m / planform.mac_m;
         cf * (correction * body_wet + thickness_factor * fin_wet) / self.ref_area_m2()
     }
 
@@ -794,22 +890,23 @@ impl RocketGeometry {
     fn validate(&self) {
         assert!(self.nose.length_m > 0.0 && self.tube.length_m > 0.0);
         assert!(self.nose.diameter_m > 0.0 && self.tube.diameter_m > 0.0);
-        assert!(self.fins.count > 0);
-        assert!(self.fins.span_m > 0.0);
-        assert!(self.fins.root_chord_m > 0.0 && self.fins.tip_chord_m > 0.0);
-        assert!(self.fins.thickness_m > 0.0);
+        let planform = self.planform();
+        assert!(planform.count > 0);
+        assert!(planform.span_m > 0.0);
+        assert!(planform.root_chord_m > 0.0 && planform.thickness_m > 0.0);
     }
 }
 
 /// Parse the compact geometry spec used by the CLI:
-/// `nose=shape:length:diameter,tube=length:diameter,fins=count:root:tip:span:sweep:thickness`,
-/// with an optional `boat=length:fore_diameter:aft_diameter` conical boat-tail
-/// at the aft end. The fin thickness is optional (default 2 mm). Lengths are
+/// `nose=shape:length:diameter,tube=length:diameter,fins=count:root:tip:span:sweep:thickness`
+/// (or `efins=count:root:span:thickness` for elliptical fins), with an
+/// optional `boat=length:fore_diameter:aft_diameter` conical boat-tail at
+/// the aft end. The fin thickness is optional (default 2 mm). Lengths are
 /// in metres.
 pub fn parse_geometry(spec: &str) -> Result<RocketGeometry> {
     let mut nose = None;
     let mut tube = None;
-    let mut fins = None;
+    let mut fins: Option<FinSet> = None;
     let mut boat_tail = None;
     for item in spec.split(',') {
         let (key, val) = item
@@ -854,14 +951,37 @@ pub fn parse_geometry(spec: &str) -> Result<RocketGeometry> {
                 let count: u32 = parts[0]
                     .parse()
                     .map_err(|_| Error::invalid("fin count", "must be an integer"))?;
-                fins = Some(TrapezoidalFins {
-                    count,
-                    root_chord_m: number(1)?,
-                    tip_chord_m: number(2)?,
-                    span_m: number(3)?,
-                    leading_sweep_m: number(4)?,
-                    thickness_m: if parts.len() == 6 { number(5)? } else { 0.002 },
-                });
+                fins = Some(
+                    TrapezoidalFins {
+                        count,
+                        root_chord_m: number(1)?,
+                        tip_chord_m: number(2)?,
+                        span_m: number(3)?,
+                        leading_sweep_m: number(4)?,
+                        thickness_m: if parts.len() == 6 { number(5)? } else { 0.002 },
+                    }
+                    .into(),
+                );
+            }
+            "efins" => {
+                if !(3..=4).contains(&parts.len()) {
+                    return Err(Error::invalid(
+                        "efins",
+                        "expected count:root:span[:thickness]",
+                    ));
+                }
+                let count: u32 = parts[0]
+                    .parse()
+                    .map_err(|_| Error::invalid("fin count", "must be an integer"))?;
+                fins = Some(
+                    EllipticalFins {
+                        count,
+                        root_chord_m: number(1)?,
+                        span_m: number(2)?,
+                        thickness_m: if parts.len() == 4 { number(3)? } else { 0.002 },
+                    }
+                    .into(),
+                );
             }
             "boat" => {
                 if parts.len() != 3 {
@@ -881,7 +1001,7 @@ pub fn parse_geometry(spec: &str) -> Result<RocketGeometry> {
                     "geometry key",
                     match other {
                         "nose" | "tube" | "fins" => unreachable!(),
-                        _ => "must be nose, tube, fins or boat",
+                        _ => "must be nose, tube, fins, efins or boat",
                     },
                 ))
             }
@@ -1238,7 +1358,7 @@ mod tests {
         // CG is the mass-weighted component mean, inside the airframe.
         let (nose_cg, _) = geo.nose_volume_properties();
         let tube_cg = geo.nose.length_m + geo.tube.length_m / 2.0;
-        let fin_cg = geo.total_length_m() - geo.fins.root_chord_m + geo.fin_planform_cg();
+        let fin_cg = geo.total_length_m() - geo.planform().root_chord_m + geo.fin_planform_cg();
         let expected_cg = (0.012 * nose_cg + 0.020 * tube_cg + 0.006 * fin_cg) / 0.038;
         assert!((props.dry_cg_m - expected_cg).abs() < 1e-12);
         assert!(props.dry_cg_m > 0.0 && props.dry_cg_m < geo.total_length_m());
@@ -1280,14 +1400,58 @@ mod tests {
     }
 
     #[test]
+    fn elliptical_fins_match_the_half_ellipse_geometry() {
+        let geo = RocketGeometry::new(
+            example().nose,
+            example().tube,
+            EllipticalFins {
+                count: 3,
+                root_chord_m: 0.05,
+                span_m: 0.05,
+                thickness_m: 0.0032,
+            },
+        );
+        let p = geo.planform();
+        // Half-ellipse: area π·cr·s/4, unswept midchord, centroid of a
+        // semi-ellipse at (cr/2, 4s/(3π)).
+        let area = std::f64::consts::PI * 0.05 * 0.05 / 4.0;
+        // The 48-strip sum (OpenRocket's own discretization) overestimates
+        // the convex arc by ~1.2%.
+        assert!(
+            (p.area_m2 - area).abs() / area < 0.02,
+            "{} vs {area}",
+            p.area_m2
+        );
+        assert!(p.cos_midchord > 0.99, "cos_midchord {}", p.cos_midchord);
+        assert!((p.cg_x_m - 0.025).abs() < 1e-12);
+        assert!((p.cg_y_m - 4.0 * 0.05 / (3.0 * std::f64::consts::PI)).abs() < 1e-12);
+        // MAC of a semi-ellipse: 8·cr/(3π).
+        let mac = 8.0 * 0.05 / (3.0 * std::f64::consts::PI);
+        assert!((p.mac_m - mac).abs() / mac < 0.02, "{} vs {mac}", p.mac_m);
+        // Cnα is positive and CP sits inside the airframe.
+        let analysis = geo.analyze();
+        assert!(analysis.cna_vs_mach[0].1 > 2.0);
+        assert!(analysis.cp_vs_mach[0].1 > 0.0 && analysis.cp_vs_mach[0].1 < geo.total_length_m());
+        // Parse end to end.
+        let parsed =
+            parse_geometry("nose=conical:0.1:0.024,tube=0.4:0.024,efins=3:0.05:0.05:0.002")
+                .unwrap();
+        assert!(matches!(parsed.fins, FinSet::Elliptical(_)));
+        // Mass model uses the elliptical centroid.
+        let props = geo.mass_properties(0.012, 0.020, 0.006, None);
+        assert!(props.pitch_inertia_kg_m2 > 0.0);
+    }
+
+    #[test]
     fn fin_set_cna_matches_diederich() {
         let geo = example();
         // Fin pair: 2π·span²/(1+sqrt(1+(span²/(A·cosΓ))²)) / Aref, then
         // (N/2)·(1+tau) — the Diederich value is a wing (two fins).
         let area = geo.fin_area();
         let cos = geo.midchord_cos();
-        let ratio = geo.fins.span_m * geo.fins.span_m / (area * cos);
-        let one = 2.0 * std::f64::consts::PI * geo.fins.span_m * geo.fins.span_m
+        let span = geo.planform().span_m;
+        let ratio = span * span / (area * cos);
+        let one = 2.0 * std::f64::consts::PI * span * span
             / (1.0 + (1.0 + ratio * ratio).sqrt())
             / geo.ref_area_m2();
         let expected = 1.5 * one * (1.0 + geo.interference_tau());
@@ -1298,7 +1462,7 @@ mod tests {
         );
         // And the classic closed form 4N(s/d)²/(1+sqrt(1+(2l/(cr+ct))²))·K.
         let d = geo.max_diameter_m();
-        let classic = 4.0 * 3.0 * (geo.fins.span_m / d).powi(2)
+        let classic = 4.0 * 3.0 * (geo.planform().span_m / d).powi(2)
             / (1.0 + (1.0_f64 + 1.0_f64).sqrt())
             * (1.0 + geo.interference_tau());
         assert!(

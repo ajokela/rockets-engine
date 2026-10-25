@@ -86,7 +86,8 @@ fn help() -> String {
      \x20                            inertia and recovery Cd·A, illustrative only\n\
      \x20 --geometry <spec>       Barrowman modeler (subsonic + supersonic):\n\
      \x20                            nose=shape:L:D,tube=L:D,fins=N:cr:ct:s:m:t\n\
-     \x20                            (m = leading-edge sweep; t = thickness, m);\n\
+     \x20                            (m = leading-edge sweep; t = thickness, m),\n\
+     \x20                            efins=N:cr:s:t for elliptical fins,\n\
      \x20                            optional boat=L:foreD:aftD conical boat-tail\n\
      \x20 --geometry-masses <n,t,f[,b]> structural masses (kg) for --geometry;\n\
      \x20                            replaces --dry-mass and estimates\n\
@@ -1844,6 +1845,19 @@ mod tests {
             err.contains("--turbulence-tau needs --turbulence"),
             "got {err}"
         );
+    }
+
+    #[cfg(feature = "ballistics")]
+    #[test]
+    fn elliptical_fin_geometry_flies() {
+        let out = run(&argv(
+            "simulate --motor estes:d12 \
+             --geometry nose=ogive:0.07:0.024,tube=0.2:0.024,efins=3:0.05:0.05:0.0032 \
+             --geometry-masses 0.00427,0.00741,0.01306 --weathercock --recover 0.25 \
+             --duration-s 3 --dt-s 0.5",
+        ))
+        .unwrap();
+        assert!(out.contains("burning"), "got {out}");
     }
 
     #[cfg(feature = "ballistics")]
