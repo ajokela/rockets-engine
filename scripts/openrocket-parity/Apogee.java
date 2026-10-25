@@ -100,6 +100,25 @@ public class Apogee {
         wind.setStandardDeviation(0.0);
         sim.simulate();
         FlightData data = sim.getSimulatedData();
+        System.out.printf("DETAIL maxV=%.2f maxMach=%.3f%n",
+                data.getMaxVelocity(), data.getMaxMachNumber());
+        info.openrocket.core.simulation.FlightDataBranch b = data.getBranch(0);
+        java.util.List<Double> machs = b.get(info.openrocket.core.simulation.FlightDataType.TYPE_MACH_NUMBER);
+        java.util.List<Double> cds = b.get(info.openrocket.core.simulation.FlightDataType.TYPE_DRAG_COEFF);
+        java.util.List<Double> fric = b.get(info.openrocket.core.simulation.FlightDataType.TYPE_FRICTION_DRAG_COEFF);
+        java.util.List<Double> pres = b.get(info.openrocket.core.simulation.FlightDataType.TYPE_PRESSURE_DRAG_COEFF);
+        java.util.List<Double> base = b.get(info.openrocket.core.simulation.FlightDataType.TYPE_BASE_DRAG_COEFF);
+        java.util.List<Double> ts = b.get(info.openrocket.core.simulation.FlightDataType.TYPE_TIME);
+        double lastM = -1;
+        for (int i = 0; i < machs.size(); i++) {
+            double m = machs.get(i);
+            if (m > 0.6 && (m - lastM > 0.15 || i == machs.size() - 1)) {
+                lastM = m;
+                System.out.printf("ROW M=%.2f cd=%.4f fric=%.4f pres=%.4f base=%.4f t=%.2f%n",
+                        m, cds.get(i), fric.get(i), pres.get(i), base.get(i), ts.get(i));
+                if (m > 1.8) break;
+            }
+        }
         return data.getMaxAltitude();
     }
 
@@ -133,5 +152,12 @@ public class Apogee {
         // Mach 0.85 — pins the transonic pressure rise.
         double d21 = fly(preparedRocket(), motor("D21", 32.0, 0.025, 0.020, 0.0154));
         System.out.printf("APOGEE_D21 %.4f%n", d21);
+
+        // G64: synthetic 128 N-s triangle (20 g propellant, 20 g casing) on
+        // the same airframe. Reaches Mach ~1.7 — pins the supersonic
+        // branch (K1 slope, nose wave drag, fin CP shift). Not a real
+        // motor; parity needs identical inputs, not provenance.
+        double g64 = fly(preparedRocket(), motor("G64", 128.0, 0.040, 0.030, 0.020));
+        System.out.printf("APOGEE_G64 %.4f%n", g64);
     }
 }

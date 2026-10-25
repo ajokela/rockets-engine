@@ -213,11 +213,13 @@ impl RocketGeometry {
             1.0 - 1.785 * (mach - 0.9)
         } else {
             let m2 = mach * mach;
-            1.214 - 0.502 / (m2 * m2) + 0.1095 / (m2 * m2 * m2 * m2)
+            1.214 - 0.502 / m2 + 0.1095 / (m2 * m2)
         };
         let cos_le = self.leading_edge_cos();
         let cd = leading_edge * cos_le * cos_le + Self::base_cd(mach) / 2.0;
-        cd * span * thickness / self.ref_area_m2()
+        // OpenRocket instances the fin set per fin; the set's drag is n
+        // times the single-fin value.
+        cd * span * thickness / self.ref_area_m2() * self.fins.count as f64
     }
 
     /// Nose pressure drag per frontal area for conical and tangent-ogive
@@ -226,10 +228,16 @@ impl RocketGeometry {
     /// Elliptical and parabolic noses are not modelled past Mach 1 yet and
     /// return 0 there (their subsonic value is 0 in this subset).
     fn nose_pressure_cd(&self, mach: f64) -> f64 {
+        // sinphi is the sine of the surface angle at 99% of the nose length
+        // (OpenRocket's SymmetricComponentCalc). For a cone that is the half
+        // angle; for a tangent ogive the surface at the base is nearly
+        // axial, so its wave drag is essentially zero — matching OpenRocket.
         let sinphi = match self.nose.shape {
             NoseShape::Conical | NoseShape::Ogive => {
+                let l = self.nose.length_m;
                 let r = self.nose.diameter_m / 2.0;
-                r / (r * r + self.nose.length_m * self.nose.length_m).sqrt()
+                let r_tip = self.nose_radius(0.99 * l);
+                (r - r_tip) / (r - r_tip).hypot(0.01 * l)
             }
             _ => return 0.0,
         };

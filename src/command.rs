@@ -1704,6 +1704,35 @@ mod tests {
 
     #[cfg(feature = "ballistics")]
     #[test]
+    fn openrocket_flight_parity_alpha_iii_g64() {
+        // Same fixture with a synthetic 128 N-s triangle, reaching Mach 1.6:
+        // pins the supersonic branch (K1 slope, nose wave drag past 1.3).
+        // The motor is synthetic by design — parity needs identical inputs,
+        // not a real motor file.
+        let out = run(&argv(
+            "simulate --motor-eng 'Test G64 18 70 0 0.02 0.04\\n0 0\\n1 128\\n2 0' \
+             --geometry nose=ogive:0.07:0.024,tube=0.2:0.024,fins=3:0.05:0.03:0.05:0.02:0.0032 \
+             --geometry-masses 0.00427,0.00741,0.01306 --duration-s 40 --dt-s 0.1",
+        ))
+        .unwrap();
+        let apogee: f64 = out
+            .split_whitespace()
+            .skip_while(|t| *t != "apogee")
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .expect("apogee line");
+        let reference: f64 = std::env::var("ROCKETS_OPENROCKET_G64_APOGEE_M")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1112.14);
+        assert!(
+            (apogee - reference).abs() / reference < 0.10,
+            "apogee {apogee} vs OpenRocket {reference}"
+        );
+    }
+
+    #[cfg(feature = "ballistics")]
+    #[test]
     fn turbulence_is_deterministic_per_seed() {
         let cmd = "simulate --curve 0:0,0.5:10,1:0 --dry-mass 0.5 --propellant-mass 0.05 \
                    --diameter-m 0.05 --cd 0:0.4,3:0.4 --wind 3,0,0 --turbulence 2 \
@@ -1769,7 +1798,7 @@ mod tests {
             .nth(1)
             .and_then(|s| s.parse().ok())
             .expect("apogee line");
-        assert!(apogee > 250.0, "apogee {apogee}");
+        assert!(apogee > 200.0, "apogee {apogee}");
         // Deterministic per seed; a different seed gusts differently.
         assert_eq!(out, run(&argv(cmd)).unwrap());
         assert_ne!(out, run(&argv(&format!("{cmd} --seed 9"))).unwrap());

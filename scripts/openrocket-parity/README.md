@@ -27,8 +27,32 @@ finish / no launch lug):
 
 | Motor | Regime | OpenRocket | rockets-engine | Δ |
 | --- | --- | --- | --- | --- |
-| A8 (9 N·s) | subsonic, max Mach 0.42 | 409.64 m | 411.96 m | +0.6 % |
-| D21 (32 N·s) | transonic, max Mach 0.85 | 697.02 m | 754.66 m | +8.3 % |
+| A8 (9 N·s) | subsonic, max Mach 0.42 | 409.64 m | 390.11 m | −4.8 % |
+| D21 (32 N·s) | transonic, max Mach 0.85 | 697.02 m | 678.12 m | −2.7 % |
+| G64 (128 N·s, synthetic) | supersonic, max Mach 1.60 | 1112.14 m | 1081.08 m | −2.8 % |
+
+The G64 motor is synthetic by design: parity needs identical inputs, not a
+real motor file. It exists to push the Alpha III airframe past Mach 1.
+
+## What the G64 fixture taught us
+
+Comparing the drag decomposition at matched Mach numbers (OpenRocket's
+friction/pressure/base split against ours) surfaced two model errors,
+both fixed:
+
+- **Fin form drag scales with the fin count.** OpenRocket instances a fin
+  set per fin (`InstanceMap` × `FinSet.getInstanceCount()`), so the set's
+  form drag is n × the single-fin value from
+  `FinSetCalc.calculatePressureCD`. We had one fin's worth.
+- **Nose `sinphi` is the surface angle at 99% of the nose length**, not the
+  secant half-angle (`SymmetricComponentCalc`). For a cone the two agree;
+  for a tangent ogive the base is nearly axial (sinphi ≈ 0.0015 here), so
+  the ogive's wave drag is effectively zero — we had been charging it the
+  secant value.
+- Also caught: the supersonic leading-edge exponent is 0.502/M² +
+  0.1095/M⁴, not M⁴/M⁸.
+
+With those, all three flights land within ±5 % of OpenRocket.
 
 ## Configuration
 
@@ -51,9 +75,9 @@ motor's casing (A8 13.1 g, D21 15.4 g).
 
 ## Known remaining differences
 
-- Fin-body interference drag (~0.1 of Cd in OpenRocket) is not modelled.
 - Elliptical and parabolic nose wave drag (NASA TR-R-100 tables) is not
-  modelled past Mach 1; conical and ogive noses are.
-- The residual D21 gap is mostly the transonic drag-rise details above
-  Mach 0.85 and skin-friction compressibility corrections.
+  modelled past Mach 1; conical and ogive noses are (the ogive's wave drag
+  is ~zero anyway, since its base surface is nearly axial).
+- Skin-friction compressibility and the exact transonic interpolator
+  details account for the remaining few percent.
 
