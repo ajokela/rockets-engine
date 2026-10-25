@@ -9,7 +9,9 @@
 
 use crate::{finite_vec, positive, Error, FlightState, ForceModel, Result, Vec3};
 use ballistics_engine::{
-    atmosphere::{calculate_air_density_cimp, get_local_atmosphere, AtmoSock},
+    atmosphere::{
+        calculate_air_density_cimp, get_local_atmosphere, reduce_qnh_to_station_pressure, AtmoSock,
+    },
     constants::GRAINS_TO_KG,
     derivatives::compute_derivatives,
     drag::DragTable,
@@ -18,7 +20,7 @@ use ballistics_engine::{
 };
 
 /// Atmospheric inputs supported by the upstream derivative kernel.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Atmosphere {
     /// Station measurements; the upstream model applies its local altitude lapse.
     /// Humidity affects station density; this derivative path uses dry-air sound speed.
@@ -53,7 +55,45 @@ impl Default for Atmosphere {
     }
 }
 
+/// Lowest and highest station altitudes [`Atmosphere::icao_standard`] takes, in
+/// metres above sea level: the ICAO troposphere, where one lapse rate holds.
+pub(crate) const ICAO_STATION_RANGE_M: (f64, f64) = (-1000.0, 11000.0);
+
+/// Earth radius upstream's ICAO table uses to turn geometric altitude into
+/// geopotential height.
+const GEOPOTENTIAL_EARTH_RADIUS_M: f64 = 6_356_766.0;
+
 impl Atmosphere {
+    /// A dry station at `station_altitude_m` above sea level reading the ICAO
+    /// standard atmosphere for that altitude. Air at every altitude is then
+    /// the standard atmosphere's, whatever the station altitude, so a launch
+    /// site at elevation E flies through standard air with its station (and
+    /// any atmosphere zones, which are readings at the station) at E.
+    ///
+    /// At 0 m this equals [`Atmosphere::default`] exactly. The altitude must
+    /// be finite and within the troposphere, -1000 to 11000 m. Temperature
+    /// follows the ICAO lapse of 6.5 K per kilometre of geopotential height;
+    /// pressure is upstream's `reduce_qnh_to_station_pressure` of the
+    /// 1013.25 hPa standard sea-level pressure.
+    pub fn icao_standard(station_altitude_m: f64) -> Result<Self> {
+        let (lowest, highest) = ICAO_STATION_RANGE_M;
+        if !station_altitude_m.is_finite() || !(lowest..=highest).contains(&station_altitude_m) {
+            return Err(Error::invalid(
+                "station_altitude_m",
+                "must be finite and within the ICAO troposphere, -1000 to 11000 m",
+            ));
+        }
+        let geopotential_m = GEOPOTENTIAL_EARTH_RADIUS_M * station_altitude_m
+            / (GEOPOTENTIAL_EARTH_RADIUS_M + station_altitude_m);
+        let temperature_k = 288.15 - 0.0065 * geopotential_m;
+        Ok(Self::Standard {
+            station_altitude_m,
+            temperature_c: temperature_k - 273.15,
+            pressure_hpa: reduce_qnh_to_station_pressure(1013.25, station_altitude_m),
+            humidity_percent: 0.0,
+        })
+    }
+
     pub(crate) fn parameters(self) -> Result<(f64, f64, f64, f64)> {
         match self {
             Self::Standard {
@@ -816,6 +856,64 @@ mod tests {
                 direct.acceleration_in_wind(&state, 0.3, Vec3::zeros()),
                 "at x {x}, y {y}"
             );
+        }
+    }
+
+    #[test]
+    fn icao_standard_at_sea_level_is_the_default() {
+        assert_eq!(Atmosphere::icao_standard(0.0), Ok(Atmosphere::default()));
+    }
+
+    #[test]
+    fn icao_standard_matches_upstreams_standard_atmosphere() {
+        // Upstream's resolver turns a default (15 °C, 1013.25 hPa) reading at a
+        // real altitude into its ICAO-table values; above its 1 m sentinel the
+        // constructor must agree with it.
+        use ballistics_engine::atmosphere::resolve_station_conditions;
+        for altitude in [1.5, 10.0, 100.0, 1500.0, 4000.0, 8848.0, 10_999.0, -400.0] {
+            let Ok(Atmosphere::Standard {
+                station_altitude_m,
+                temperature_c,
+                pressure_hpa,
+                humidity_percent,
+            }) = Atmosphere::icao_standard(altitude)
+            else {
+                panic!("standard station at {altitude} m");
+            };
+            let (t, p) = resolve_station_conditions(15.0, 1013.25, altitude);
+            assert_eq!(station_altitude_m, altitude);
+            assert_eq!(humidity_percent, 0.0);
+            assert!(
+                (temperature_c - t).abs() < 1e-9,
+                "{altitude} m: {temperature_c} vs {t}"
+            );
+            assert!(
+                (pressure_hpa - p).abs() < 1e-9 * p,
+                "{altitude} m: {pressure_hpa} vs {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn standard_air_is_the_same_whatever_the_station_altitude() {
+        // A standard station at 1500 m and one at sea level describe one
+        // atmosphere. Temperature, so sound speed, is the same at every
+        // altitude; density differs by the constant 2.5e-5 by which the
+        // station's CIPM density departs from upstream's ideal-gas lapse.
+        let pad = Air::new(Atmosphere::icao_standard(1500.0).unwrap()).unwrap();
+        let sea = Air::new(Atmosphere::default()).unwrap();
+        for y in [0.0, 1500.0, 3000.0, 10_000.0, 15_000.0] {
+            let (rho_pad, c_pad) = pad.at(Vec3::new(0.0, y, 0.0));
+            let (rho_sea, c_sea) = sea.at(Vec3::new(0.0, y, 0.0));
+            assert!((rho_pad - rho_sea).abs() < 3e-5 * rho_sea, "rho at {y} m");
+            assert!((c_pad - c_sea).abs() < 1e-12 * c_sea, "sound at {y} m");
+        }
+    }
+
+    #[test]
+    fn icao_standard_refuses_altitudes_outside_the_troposphere() {
+        for altitude in [f64::NAN, f64::INFINITY, -1000.5, 11_000.5] {
+            assert!(Atmosphere::icao_standard(altitude).is_err(), "{altitude}");
         }
     }
 

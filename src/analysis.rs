@@ -1,30 +1,18 @@
 //! Analysis commands built on the shared trajectory runner: Monte Carlo
 //! dispersion and elevation solving. No new physics — repeated integration.
 
-use crate::command::{apogee, parse, run_trajectory, Row};
+use crate::command::{apogee, parse, run_trajectory, Ground, Row};
 #[cfg(feature = "ballistics")]
 use crate::Vec3;
 
-/// First ground crossing between sampled rows, linearly interpolated.
-/// Skips degenerate all-on-the-pad runs by requiring a positive altitude first.
-pub(crate) fn impact_row(rows: &[Row]) -> Option<Row> {
-    for pair in rows.windows(2) {
-        let (a, b) = (pair[0], pair[1]);
-        if a.y > 0.0 && b.y <= 0.0 {
-            let fraction = a.y / (a.y - b.y);
-            return Some(Row {
-                t: a.t + (b.t - a.t) * fraction,
-                x: a.x + (b.x - a.x) * fraction,
-                y: 0.0,
-                z: a.z + (b.z - a.z) * fraction,
-                speed: a.speed + (b.speed - a.speed) * fraction,
-                mass: 0.0,
-                thrust: 0.0,
-                phase: "impact",
-            });
-        }
-    }
-    None
+/// First ground crossing between sampled rows, linearly interpolated on the
+/// height above the ground. Skips degenerate all-on-the-pad runs by requiring
+/// a sample above the ground first.
+pub(crate) fn impact_row(rows: &[Row], ground: &Ground) -> Option<Row> {
+    let height = |r: &Row| ground.height_m(crate::Vec3::new(r.x, r.y, r.z));
+    rows.windows(2)
+        .find(|pair| height(&pair[0]) > 0.0 && height(&pair[1]) <= 0.0)
+        .map(|pair| ground.impact(&pair[0], &pair[1]))
 }
 
 /// SplitMix64: tiny deterministic PRNG so dispersion needs no dependencies.
@@ -82,7 +70,7 @@ pub(crate) fn dispersion(args: &[String]) -> Result<String, String> {
         let (rows, _) = run_trajectory(&opts, true)?;
         let (peak, _) = apogee(&rows).ok_or("error: empty trajectory")?;
         apogees.push(peak);
-        if let Some(impact) = impact_row(&rows) {
+        if let Some(impact) = impact_row(&rows, &opts.ground) {
             impacts.push((impact.x, impact.z));
         } else if let Some(last) = rows.last() {
             impacts.push((last.x, last.z));
@@ -141,7 +129,7 @@ pub(crate) fn solve_range(args: &[String]) -> Result<String, String> {
         let mut opts = parsed.opts.clone();
         opts.elevation_deg = elevation;
         let (rows, _) = run_trajectory(&opts, true)?;
-        impact_row(&rows).map(|r| r.x).ok_or_else(|| {
+        impact_row(&rows, &opts.ground).map(|r| r.x).ok_or_else(|| {
             "error: no ground impact; increase --duration-s or the launch speed".to_string()
         })
     };
@@ -186,7 +174,7 @@ pub(crate) fn solve_range(args: &[String]) -> Result<String, String> {
     opts.elevation_deg = mid;
     let (rows, _) = run_trajectory(&opts, false)?;
     let (peak, t) = apogee(&rows).ok_or("error: empty trajectory")?;
-    let impact = impact_row(&rows).ok_or("error: no ground impact")?;
+    let impact = impact_row(&rows, &opts.ground).ok_or("error: no ground impact")?;
     Ok(format!(
         "target_range_m: {target:.2}\nelevation_deg: {mid:.4}\nrange_m: {:.2}\napogee_m: {peak:.2} at t = {t:.3} s\nimpact_speed_mps: {:.2}\n",
         impact.x, impact.speed
@@ -235,7 +223,7 @@ mod tests {
             .opts;
         opts.elevation_deg = 30.0;
         let (rows, _) = run_trajectory(&opts, true).unwrap();
-        let target = impact_row(&rows).unwrap().x;
+        let target = impact_row(&rows, &opts.ground).unwrap().x;
         let out =
             solve_range(&argv(&format!("solve-range {target} {base} --elevation-deg 30"))[1..])
                 .unwrap();
