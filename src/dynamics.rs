@@ -7,7 +7,7 @@
 //! and `with_body_lift` closes the loop through the resulting angle of attack.
 
 use crate::{
-    ballistics::{local_air, mach_table, Atmosphere},
+    ballistics::{mach_table, Air, Atmosphere},
     ControlInput, Error, Guidance, GuidanceContext, Result, Vec3,
 };
 use ballistics_engine::drag::DragTable;
@@ -80,8 +80,7 @@ impl WeathercockParams {
 #[derive(Debug, Clone)]
 pub struct Weathercock {
     params: WeathercockParams,
-    atmosphere: Atmosphere,
-    atmos_params: (f64, f64, f64, f64),
+    air: Air,
     wind_mps: Vec3,
     wind_sock: Option<ballistics_engine::wind::WindSock>,
     wind_field: Option<crate::ballistics::SharedWindField>,
@@ -92,7 +91,8 @@ pub struct Weathercock {
 
 impl Weathercock {
     /// `initial_axis` is the pad orientation (normalized at construction).
-    /// `atmosphere` and `wind_mps` should match the force model's air.
+    /// `atmosphere` and `wind_mps` should match the force model's air; pass
+    /// its atmosphere zones too, through [`Self::with_atmosphere_zones`].
     pub fn new(
         params: WeathercockParams,
         initial_axis: Vec3,
@@ -106,9 +106,8 @@ impl Weathercock {
             return Err(Error::invalid("wind_mps", "must be finite"));
         }
         Ok(Self {
-            atmos_params: atmosphere.parameters()?,
+            air: Air::new(atmosphere)?,
             params,
-            atmosphere,
             wind_mps,
             wind_sock: None,
             wind_field: None,
@@ -136,6 +135,16 @@ impl Weathercock {
             ballistics_engine::wind::WindSock::try_new(segments)
                 .map_err(|e| Error::Model(format!("invalid wind segments: {e:?}")))?,
         );
+        Ok(self)
+    }
+
+    /// Read the same station-referenced atmosphere zones as the force model
+    /// (see [`crate::ballistics::BallisticForces::with_atmosphere_zones`]):
+    /// with the same ladder, the restoring torque uses the drag kernel's air
+    /// at every position. The atmosphere passed to [`Self::new`] must be
+    /// `Standard`.
+    pub fn with_atmosphere_zones(mut self, zones: Vec<(f64, f64, f64, f64)>) -> Result<Self> {
+        self.air = self.air.with_zones(zones)?;
         Ok(self)
     }
 
@@ -216,11 +225,7 @@ impl Guidance for Weathercock {
             return Ok(ControlInput::along(self.axis));
         }
         let target = v_air / speed;
-        let (rho, sound) = local_air(
-            self.atmosphere,
-            self.atmos_params,
-            context.state.position_m.y,
-        );
+        let (rho, sound) = self.air.at(context.state.position_m);
         let mach = speed / sound;
         let q = 0.5 * rho * speed * speed;
         let area = std::f64::consts::FRAC_PI_4 * self.params.diameter_m.powi(2);

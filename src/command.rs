@@ -79,9 +79,11 @@ fn help() -> String {
      \x20 --motor-eng <text>      inline RASP .eng motor text (curve + propellant)\n\
      \x20 --motor-file <path>     .eng file on disk (native CLI only)\n\
      \x20 --recover <cdA>         drogue Cd·A in m²; recovery drag on descent\n\
+     \x20                            (flat frame: uniform or vacuum gravity)\n\
      \x20 --recovery-after-s <t>  absolute-time gate for deployment [0=apogee]\n\
      \x20 --recover-main <cdA>    main parachute Cd·A (dual deployment)\n\
-     \x20 --main-altitude-m <m>   swap to the main below this altitude [300]\n\
+     \x20 --main-altitude-m <m>   swap to the main at or below this altitude\n\
+     \x20                            above sea level [ground + 300]\n\
      \x20 --airframe <preset>     sport24 or hp54: diameter, Cd, Cnα, CP, CG,\n\
      \x20                            inertia and recovery Cd·A, illustrative only\n\
      \x20 --geometry <spec>       Barrowman modeler (subsonic + supersonic):\n\
@@ -101,7 +103,16 @@ fn help() -> String {
      \x20 --elevation-deg <deg>    launch elevation above horizontal [90]\n\
      \x20 --azimuth-deg <deg>      launch azimuth from +X toward +Z [0]\n\
      \x20 --speed-mps <v>          initial speed along the launch axis [0]\n\
-     \x20 --position-m <x,y,z>     initial position [0,0,0]\n\
+     \x20 --ground-altitude-m <m>  altitude above sea level of the ground and\n\
+     \x20                            the weather station [0]; impact is y\n\
+     \x20                            reaching it (central gravity: the sphere).\n\
+     \x20                            Flat frame: -1000 to 11000 m, the ICAO\n\
+     \x20                            troposphere the station's air comes from\n\
+     \x20 --position-m <x,y,z>     initial position [0,ground,0]. Flat frame\n\
+     \x20                            (uniform or vacuum gravity): y is altitude\n\
+     \x20                            above sea level, at or above the ground.\n\
+     \x20                            Central gravity: in --center's frame, at\n\
+     \x20                            or outside the ground sphere\n\
      \x20 --prograde              thrust follows velocity (gravity turn)\n\
      \x20 --weathercock           second-order body-axis dynamics toward the\n\
      \x20                            relative wind (needs --cna, --cp, --cg-dry-m,\n\
@@ -121,7 +132,11 @@ fn help() -> String {
      \x20 --gravity <mode>         uniform [default], central, vacuum\n\
      \x20 --mu <m3/s2>             central-gravity parameter [Earth]\n\
      \x20 --center <x,y,z>         central-gravity center [0,0,0]\n\
-     \x20 --space-above-m <alt>    above this altitude use vacuum (or central)\n\
+     \x20 --radius-m <R>           central gravity: planet radius [6371000];\n\
+     \x20                            the ground is the sphere of radius\n\
+     \x20                            R + ground altitude about --center. The\n\
+     \x20                            default pad must sit on it: --center 0,-R,0\n\
+     \x20 --space-above-m <alt>    above this altitude use vacuum (flat frame)\n\
      \n\
      ATMOSPHERE & AERO (feature 'ballistics', default)\n\
      \x20 --diameter-m <d>         body diameter; enables drag with --cd\n\
@@ -137,7 +152,9 @@ fn help() -> String {
      \x20 --turbulence <sigma>     deterministic gust RMS per axis, m/s [0]\n\
      \x20 --turbulence-tau <s>     gust correlation period [2.0]\n\
      \x20 --atmo-zone <t:p:h:u>    atmosphere zone, repeatable: temp C,\n\
-     \x20                            pressure hPa, humidity %, until downrange m\n\
+     \x20                            pressure hPa, humidity %, until downrange m.\n\
+     \x20                            A reading at the station, on the ground;\n\
+     \x20                            every force reads it\n\
      \x20 --twist-in <in/turn>     effective spin twist; enables Magnus + yaw\n\
      \x20                            of repose (needs --body-length-m)\n\
      \x20 --body-length-m <m>       airframe length for the spin model\n\
@@ -180,7 +197,10 @@ pub(crate) struct Options {
     pub(crate) elevation_deg: f64,
     pub(crate) azimuth_deg: f64,
     pub(crate) speed_mps: f64,
+    /// Start position: `--position-m`, or the pad at `(0, ground, 0)`.
     pub(crate) position_m: Vec3,
+    /// The surface impact is measured against.
+    pub(crate) ground: Ground,
     pub(crate) format: Format,
     pub(crate) plot: bool,
     pub(crate) prograde: bool,
@@ -210,6 +230,10 @@ pub(crate) struct Options {
     pub(crate) geometry_masses: Option<(f64, f64, f64, Option<f64>)>,
     /// (casing mass kg, motor length m) retained from a motor file.
     pub(crate) motor_casing: Option<(f64, f64)>,
+    /// The weather station: ICAO standard air at the ground altitude. The
+    /// flat frame only; central gravity refuses every force that reads air.
+    #[cfg(feature = "ballistics")]
+    pub(crate) atmosphere: Option<crate::ballistics::Atmosphere>,
     #[cfg(feature = "ballistics")]
     pub(crate) diameter_m: Option<f64>,
     #[cfg(feature = "ballistics")]
@@ -242,6 +266,64 @@ pub(crate) struct Options {
     pub(crate) cna: Option<Vec<(f64, f64)>>,
     #[cfg(feature = "ballistics")]
     pub(crate) lift_k: Option<Vec<(f64, f64)>>,
+}
+
+#[cfg(feature = "ballistics")]
+impl Options {
+    /// The weather station every force that reads air is built on.
+    fn station(&self) -> Result<crate::ballistics::Atmosphere, String> {
+        self.atmosphere.ok_or_else(|| {
+            "error: forces that read air need the flat frame (uniform or vacuum gravity)"
+                .to_string()
+        })
+    }
+}
+
+/// Earth's mean radius, the default `--radius-m` for central gravity.
+const EARTH_MEAN_RADIUS_M: f64 = 6_371_000.0;
+
+/// The ground a flight lands on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Ground {
+    /// Flat frame: the plane Y = `altitude_m`, altitude above sea level.
+    Plane { altitude_m: f64 },
+    /// Central gravity: the sphere of `radius_m` (planet radius plus ground
+    /// altitude) about the gravity center.
+    Sphere { center_m: Vec3, radius_m: f64 },
+}
+
+impl Ground {
+    /// Signed height of a point above the ground; zero or less is impact.
+    pub(crate) fn height_m(&self, position_m: Vec3) -> f64 {
+        match *self {
+            Self::Plane { altitude_m } => position_m.y - altitude_m,
+            Self::Sphere { center_m, radius_m } => (position_m - center_m).norm() - radius_m,
+        }
+    }
+
+    /// The impact point between a sample above the ground and the next one
+    /// at or below it, linearly interpolated on height above the ground.
+    pub(crate) fn impact(&self, above: &Row, below: &Row) -> Row {
+        let (ha, hb) = (
+            self.height_m(Vec3::new(above.x, above.y, above.z)),
+            self.height_m(Vec3::new(below.x, below.y, below.z)),
+        );
+        let fraction = ha / (ha - hb);
+        let lerp = |a: f64, b: f64| a + (b - a) * fraction;
+        Row {
+            t: lerp(above.t, below.t),
+            x: lerp(above.x, below.x),
+            y: match *self {
+                Self::Plane { altitude_m } => altitude_m,
+                Self::Sphere { .. } => lerp(above.y, below.y),
+            },
+            z: lerp(above.z, below.z),
+            speed: lerp(above.speed, below.speed),
+            mass: 0.0,
+            thrust: 0.0,
+            phase: "impact",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -398,7 +480,8 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     let mut elevation_deg = 90.0;
     let mut azimuth_deg = 0.0;
     let mut speed_mps = 0.0;
-    let mut position_m = Vec3::zeros();
+    let mut position_m = None;
+    let mut ground_altitude_m = 0.0;
     let mut format = Format::Table;
     let mut plot = false;
     let mut prograde = false;
@@ -416,6 +499,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     let mut gravity = GravityMode::Uniform;
     let mut mu = None;
     let mut center = Vec3::zeros();
+    let mut radius_m = None;
     let mut space_above_m = None;
     let mut stages = Vec::new();
     let mut motor_eng = None;
@@ -497,7 +581,8 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
             "--elevation-deg" => elevation_deg = parse_f64(&value(flag)?, flag)?,
             "--azimuth-deg" => azimuth_deg = parse_f64(&value(flag)?, flag)?,
             "--speed-mps" => speed_mps = parse_f64(&value(flag)?, flag)?,
-            "--position-m" => position_m = parse_vec3(&value(flag)?, flag)?,
+            "--position-m" => position_m = Some(parse_vec3(&value(flag)?, flag)?),
+            "--ground-altitude-m" => ground_altitude_m = parse_f64(&value(flag)?, flag)?,
             "--format" => {
                 format = match value(flag)?.as_str() {
                     "table" => Format::Table,
@@ -543,6 +628,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
             }
             "--mu" => mu = Some(parse_f64(&value(flag)?, flag)?),
             "--center" => center = parse_vec3(&value(flag)?, flag)?,
+            "--radius-m" => radius_m = Some(parse_f64(&value(flag)?, flag)?),
             "--space-above-m" => space_above_m = Some(parse_f64(&value(flag)?, flag)?),
             "--stage" => stages.push(parse_stage(&value(flag)?)?),
             "--motor-eng" => motor_eng = Some(value(flag)?),
@@ -773,7 +859,10 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     };
     let recover_main = match (recover_main, recover) {
         (Some(_), None) => return Err("error: --recover-main needs --recover".to_string()),
-        (Some(cd_area), Some(_)) => Some((cd_area, main_altitude_m.unwrap_or(300.0))),
+        (Some(cd_area), Some(_)) => Some((
+            cd_area,
+            main_altitude_m.unwrap_or(ground_altitude_m + 300.0),
+        )),
         (None, _) => None,
     };
     #[cfg(feature = "ballistics")]
@@ -794,6 +883,96 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
         }
     };
 
+    if !ground_altitude_m.is_finite() {
+        return Err("error: --ground-altitude-m must be finite".to_string());
+    }
+    // The weather station is ICAO standard air at the ground, so in the flat
+    // frame the ground must lie in the troposphere. Central gravity refuses
+    // every force that reads air, so it has no station and takes any ground.
+    #[cfg(feature = "ballistics")]
+    let atmosphere = if gravity == GravityMode::Central {
+        None
+    } else {
+        Some(
+            crate::ballistics::Atmosphere::icao_standard(ground_altitude_m).map_err(|_| {
+                let (lowest, highest) = crate::ballistics::ICAO_STATION_RANGE_M;
+                format!(
+                    "error: --ground-altitude-m must be between {lowest} and {highest} m in the \
+                     flat frame (the troposphere the weather station's standard air comes from)"
+                )
+            })?,
+        )
+    };
+    if gravity == GravityMode::Central {
+        if recover.is_some() {
+            return Err(
+                "error: --recover needs the flat frame (uniform or vacuum gravity): \
+                 recovery applies flat gravity along -y and reads its air at y"
+                    .to_string(),
+            );
+        }
+        if space_above_m.is_some() {
+            return Err(
+                "error: --space-above-m does nothing with --gravity central, which applies \
+                 on both sides; use it with uniform gravity"
+                    .to_string(),
+            );
+        }
+    } else if radius_m.is_some() {
+        return Err("error: --radius-m needs --gravity central".to_string());
+    }
+    let default_pad = position_m.is_none();
+    let position_m = position_m.unwrap_or(Vec3::new(0.0, ground_altitude_m, 0.0));
+    let ground = if gravity == GravityMode::Central {
+        let radius_m = radius_m.unwrap_or(EARTH_MEAN_RADIUS_M);
+        if !(radius_m.is_finite() && radius_m > 0.0) || radius_m + ground_altitude_m <= 0.0 {
+            return Err(
+                "error: --radius-m must be positive and finite, and the ground sphere's \
+                 radius (--radius-m + --ground-altitude-m) positive"
+                    .to_string(),
+            );
+        }
+        Ground::Sphere {
+            center_m: center,
+            radius_m: radius_m + ground_altitude_m,
+        }
+    } else {
+        Ground::Plane {
+            altitude_m: ground_altitude_m,
+        }
+    };
+    let height_m = ground.height_m(position_m);
+    match ground {
+        Ground::Plane { .. } if height_m < 0.0 => {
+            return Err(format!(
+                "error: the start (y = {} m) is below the ground at {ground_altitude_m} m; \
+                 in the flat frame y is altitude above sea level (see --ground-altitude-m)",
+                position_m.y
+            ));
+        }
+        // Beyond rounding: a part in 10^12 of the radius (micrometres for Earth).
+        Ground::Sphere { center_m, radius_m } if height_m < -1e-12 * radius_m => {
+            return Err(format!(
+                "error: the start is {:.3} m inside the ground, the sphere of radius {radius_m} m \
+                 (--radius-m + --ground-altitude-m) about --center {},{},{}. Put --center at \
+                 0,-R,0 to launch from 0,ground,0, or start at --position-m R + h from --center",
+                -height_m, center_m.x, center_m.y, center_m.z
+            ));
+        }
+        // The default pad stands on the ground, which needs --center R + E
+        // below it; anywhere else it would float and fly the drop as range.
+        Ground::Sphere { center_m, radius_m } if default_pad && height_m > 1e-12 * radius_m => {
+            return Err(format!(
+                "error: the default pad (0,{ground_altitude_m},0) is {height_m:.3} m above the \
+                 ground, the sphere of radius {radius_m} m (--radius-m + --ground-altitude-m) \
+                 about --center {},{},{}. Put --center at 0,-R,0 with R = --radius-m, or give \
+                 --position-m to launch from altitude",
+                center_m.x, center_m.y, center_m.z
+            ));
+        }
+        _ => {}
+    }
+
     let opts = Options {
         duration_s,
         curve,
@@ -805,6 +984,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
         azimuth_deg,
         speed_mps,
         position_m,
+        ground,
         format,
         plot,
         prograde,
@@ -831,6 +1011,8 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
         geometry,
         geometry_masses,
         motor_casing,
+        #[cfg(feature = "ballistics")]
+        atmosphere,
         #[cfg(feature = "ballistics")]
         diameter_m,
         #[cfg(feature = "ballistics")]
@@ -996,7 +1178,9 @@ fn wind_field_arc(
 
 /// Assemble the rocket, environment and guidance chain, then integrate.
 /// Returns the sampled rows and the internal RK4 substep count.
-/// `stop_at_impact` ends the run at the first ground crossing (y reaching 0).
+/// `stop_at_impact` ends the run at the first sample after t = 0 at or below the ground
+/// ([`Ground`]): the plane Y = `--ground-altitude-m`, Y being altitude above sea level, or
+/// under central gravity the sphere of radius `--radius-m` + that altitude about `--center`.
 pub(crate) fn run_trajectory(
     opts: &Options,
     stop_at_impact: bool,
@@ -1148,6 +1332,16 @@ pub(crate) fn run_trajectory(
         || lift_k.is_some()
         || opts.weathercock;
     #[cfg(feature = "ballistics")]
+    if opts.gravity == GravityMode::Central && (use_drag || wants_mpm) {
+        // Drag, spin, body lift and the weathercock read their air at raw Y,
+        // which under central gravity is not altitude.
+        return Err(
+            "error: central gravity and the drag adapter (drag, spin, body lift, weathercock) \
+             do not mix; use uniform gravity with --space-above-m for the atmosphere/space split"
+                .to_string(),
+        );
+    }
+    #[cfg(feature = "ballistics")]
     if wants_mpm && !use_drag {
         return Err(
             "error: spin, coriolis and tipoff act through the drag adapter; add --diameter-m and --cd"
@@ -1156,19 +1350,10 @@ pub(crate) fn run_trajectory(
     }
 
     let mut base = match opts.gravity {
-        GravityMode::Central => {
-            #[cfg(feature = "ballistics")]
-            if use_drag {
-                return Err(
-                    "error: central gravity and the drag adapter do not mix; use --space-above-m for the atmosphere/space split"
-                        .to_string(),
-                );
-            }
-            Forces::Central(match opts.mu {
-                Some(mu) => CentralGravity::new(mu, opts.center).map_err(fmt_err)?,
-                None => CentralGravity::earth(opts.center).map_err(fmt_err)?,
-            })
-        }
+        GravityMode::Central => Forces::Central(match opts.mu {
+            Some(mu) => CentralGravity::new(mu, opts.center).map_err(fmt_err)?,
+            None => CentralGravity::earth(opts.center).map_err(fmt_err)?,
+        }),
         GravityMode::Vacuum => Forces::Uniform(UniformGravity(Vec3::zeros())),
         GravityMode::Uniform => {
             #[cfg(feature = "ballistics")]
@@ -1180,7 +1365,7 @@ pub(crate) fn run_trajectory(
                 let mut forces = crate::ballistics::BallisticForces::new(
                     diameter,
                     cd,
-                    crate::ballistics::Atmosphere::default(),
+                    opts.station()?,
                     opts.wind_mps,
                 )
                 .map_err(fmt_err)?;
@@ -1245,13 +1430,8 @@ pub(crate) fn run_trajectory(
     };
 
     if let Some(cutoff) = opts.space_above_m {
-        let above: Forces = match opts.gravity {
-            GravityMode::Central => match opts.mu {
-                Some(mu) => Forces::Central(CentralGravity::new(mu, opts.center).map_err(fmt_err)?),
-                None => Forces::Central(CentralGravity::earth(opts.center).map_err(fmt_err)?),
-            },
-            _ => Forces::Uniform(UniformGravity(Vec3::zeros())),
-        };
+        // Flat frame only (parse refuses it with central gravity): vacuum above.
+        let above = Forces::Uniform(UniformGravity(Vec3::zeros()));
         base = Forces::Switched(
             AltitudeSwitch::new(
                 BoxedForces(Box::new(base)),
@@ -1275,13 +1455,18 @@ pub(crate) fn run_trajectory(
             BoxedForces(Box::new(base)),
             cd_area,
             opts.recovery_after_s,
-            crate::ballistics::Atmosphere::default(),
+            opts.station()?,
             opts.wind_mps,
         )
         .map_err(fmt_err)?;
         if let Some((main_cd_area, altitude_m)) = opts.recover_main {
             recovery = recovery
                 .with_main(main_cd_area, altitude_m)
+                .map_err(fmt_err)?;
+        }
+        if !opts.atmo_zones.is_empty() {
+            recovery = recovery
+                .with_atmosphere_zones(opts.atmo_zones.clone())
                 .map_err(fmt_err)?;
         }
         if let Some((sigma, tau)) = opts.turbulence {
@@ -1325,13 +1510,13 @@ pub(crate) fn run_trajectory(
             opts.damping_ratio,
         )
         .map_err(fmt_err)?;
-        let mut weathercock = crate::Weathercock::new(
-            params,
-            axis,
-            crate::ballistics::Atmosphere::default(),
-            opts.wind_mps,
-        )
-        .map_err(fmt_err)?;
+        let mut weathercock = crate::Weathercock::new(params, axis, opts.station()?, opts.wind_mps)
+            .map_err(fmt_err)?;
+        if !opts.atmo_zones.is_empty() {
+            weathercock = weathercock
+                .with_atmosphere_zones(opts.atmo_zones.clone())
+                .map_err(fmt_err)?;
+        }
         if let Some((sigma, tau)) = opts.turbulence {
             weathercock = weathercock
                 .with_turbulence(sigma, tau, opts.turbulence_seed)
@@ -1412,7 +1597,7 @@ pub(crate) fn run_trajectory(
         substeps += result.substeps;
         state = result.state;
         rows.push(sample(&state)?);
-        if stop_at_impact && state.time_s > 0.0 && state.position_m.y <= 0.0 {
+        if stop_at_impact && state.time_s > 0.0 && opts.ground.height_m(state.position_m) <= 0.0 {
             break;
         }
     }
@@ -1433,7 +1618,7 @@ fn render(rows: &[Row], opts: &Options, substeps: usize) -> String {
         if let Some((apogee, t)) = apogee(rows) {
             out.push_str(&format!("apogee {apogee:.2} m at t = {t:.3} s\n"));
         }
-        if let Some(impact) = crate::analysis::impact_row(rows) {
+        if let Some(impact) = crate::analysis::impact_row(rows, &opts.ground) {
             out.push_str(&format!(
                 "impact x = {:.2} m, z = {:.2} m at t = {:.3} s, speed {:.2} m/s\n",
                 impact.x, impact.z, impact.t, impact.speed
@@ -1442,7 +1627,7 @@ fn render(rows: &[Row], opts: &Options, substeps: usize) -> String {
     }
     if opts.plot {
         out.push('\n');
-        out.push_str(&render_plot(rows));
+        out.push_str(&render_plot(rows, &opts.ground));
     }
     out
 }
@@ -1497,20 +1682,39 @@ fn render_json(rows: &[Row]) -> String {
     out
 }
 
-fn render_plot(rows: &[Row]) -> String {
+/// ASCII altitude chart whose floor is the ground: in the flat frame, altitude
+/// above sea level over the ground plane; under central gravity, the height
+/// above the ground sphere, since Y there is not altitude (in an Earth-centred
+/// frame it is the distance from the planet's center).
+fn render_plot(rows: &[Row], ground: &Ground) -> String {
     const HEIGHT: usize = 18;
     const WIDTH: usize = 72;
-    let peak = rows.iter().map(|r| r.y).fold(0.0_f64, f64::max);
-    if peak <= 0.0 {
+    let (values, floor_m): (Vec<f64>, f64) = match *ground {
+        Ground::Plane { altitude_m } => (rows.iter().map(|r| r.y).collect(), altitude_m),
+        Ground::Sphere { .. } => (
+            rows.iter()
+                .map(|r| ground.height_m(Vec3::new(r.x, r.y, r.z)))
+                .collect(),
+            0.0,
+        ),
+    };
+    let peak = values.iter().copied().fold(floor_m, f64::max);
+    if peak <= floor_m {
         return "altitude never leaves the pad\n".to_string();
     }
     let mut grid = vec![vec![b' '; WIDTH]; HEIGHT];
-    for (i, r) in rows.iter().enumerate() {
-        let col = i * (WIDTH - 1) / rows.len().max(1);
-        let row = ((r.y / peak) * (HEIGHT - 1) as f64).round() as usize;
+    for (i, value) in values.iter().enumerate() {
+        let col = i * (WIDTH - 1) / values.len().max(1);
+        let row = (((value - floor_m) / (peak - floor_m)) * (HEIGHT - 1) as f64).round() as usize;
         grid[HEIGHT - 1 - row][col] = b'*';
     }
-    let mut out = format!("altitude_m (peak {peak:.1})\n");
+    let mut out = match *ground {
+        Ground::Plane { altitude_m: 0.0 } => format!("altitude_m (peak {peak:.1})\n"),
+        Ground::Plane { altitude_m } => {
+            format!("altitude_m (peak {peak:.1}, ground {altitude_m:.1})\n")
+        }
+        Ground::Sphere { .. } => format!("height_m above the ground (peak {peak:.1})\n"),
+    };
     for line in &grid {
         out.push('|');
         out.push_str(std::str::from_utf8(line).unwrap());
