@@ -154,6 +154,10 @@ fn help() -> String {
      \x20 --wind-grib <path>       GRIB2 forecast file as the profile (native CLI)\n\
      \x20 --grib-point <lat,lon>   where in the grid to sample (required)\n\
      \x20 --grib-azimuth-deg <deg> compass direction of the downrange axis [0]\n\
+     \x20 --wind-dem <path>       ASCII DEM for terrain-adjusted wind (native CLI)\n\
+     \x20 --wind-monitors <path>  monitor readings: lat,lon,speed_ms,dir_compass_deg\n\
+     \x20 --monitor-ref <lat,lon> geo point that maps to the DEM's frame origin\n\
+     \x20 --monitor-north-azimuth <deg> compass direction of downrange +x [0]\n\
      \x20 --turbulence <sigma>     deterministic gust RMS per axis, m/s [0]\n\
      \x20 --turbulence-tau <s>     gust correlation period [2.0]\n\
      \x20 --atmo-zone <t:p:h:u>    atmosphere zone, repeatable: temp C,\n\
@@ -252,6 +256,8 @@ pub(crate) struct Options {
     #[cfg(feature = "ballistics")]
     pub(crate) wind_profile: Option<winds_engine::ProfileField>,
     #[cfg(feature = "ballistics")]
+    pub(crate) wind_terrain: Option<TerrainSpec>,
+    #[cfg(feature = "ballistics")]
     pub(crate) turbulence: Option<(f64, f64)>,
     #[cfg(feature = "ballistics")]
     pub(crate) turbulence_seed: u64,
@@ -330,6 +336,27 @@ impl Ground {
         }
     }
 }
+
+/// Terrain-adjusted wind: a DEM plus distributed surface monitors.
+#[cfg(feature = "ballistics")]
+#[derive(Clone)]
+pub(crate) struct TerrainSpec {
+    dem_path: String,
+    monitors_path: String,
+    ref_lat: f64,
+    ref_lon: f64,
+    north_azimuth: f64,
+}
+
+/// Fixed terrain-model settings (documented; not flag-exposed yet).
+#[cfg(feature = "ballistics")]
+const TERRAIN_LEVELS_AGL: &[f64] = &[10.0, 50.0, 150.0, 500.0];
+#[cfg(feature = "ballistics")]
+const TERRAIN_OBS_LENGTH_M: f64 = 1500.0;
+#[cfg(feature = "ballistics")]
+const TERRAIN_SURFACE_DECAY_M: f64 = 300.0;
+#[cfg(feature = "ballistics")]
+const TERRAIN_SCALE_M: f64 = 400.0;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum GravityMode {
@@ -547,6 +574,14 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     #[cfg(feature = "ballistics")]
     let mut grib_azimuth_deg = 0.0_f64;
     #[cfg(feature = "ballistics")]
+    let mut wind_dem = None;
+    #[cfg(feature = "ballistics")]
+    let mut wind_monitors = None;
+    #[cfg(feature = "ballistics")]
+    let mut monitor_ref = None;
+    #[cfg(feature = "ballistics")]
+    let mut monitor_north_azimuth = 0.0_f64;
+    #[cfg(feature = "ballistics")]
     let mut wind_zones = Vec::new();
     #[cfg(feature = "ballistics")]
     let mut atmo_zones = Vec::new();
@@ -712,6 +747,14 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
             "--grib-point" => grib_point = Some(value(flag)?),
             #[cfg(feature = "ballistics")]
             "--grib-azimuth-deg" => grib_azimuth_deg = parse_f64(&value(flag)?, flag)?,
+            #[cfg(feature = "ballistics")]
+            "--wind-dem" => wind_dem = Some(value(flag)?),
+            #[cfg(feature = "ballistics")]
+            "--wind-monitors" => wind_monitors = Some(value(flag)?),
+            #[cfg(feature = "ballistics")]
+            "--monitor-ref" => monitor_ref = Some(value(flag)?),
+            #[cfg(feature = "ballistics")]
+            "--monitor-north-azimuth" => monitor_north_azimuth = parse_f64(&value(flag)?, flag)?,
             #[cfg(feature = "ballistics")]
             "--turbulence" => turbulence = Some(parse_f64(&value(flag)?, flag)?),
             #[cfg(feature = "ballistics")]
@@ -907,6 +950,38 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
         }
         parsed
     };
+    #[cfg(feature = "ballistics")]
+    let wind_terrain = match (wind_dem, wind_monitors) {
+        (None, None) => None,
+        (Some(dem_path), Some(monitors_path)) => {
+            let (ref_lat, ref_lon) = match monitor_ref {
+                Some(r) => {
+                    let (a, b) = r
+                        .split_once(',')
+                        .ok_or("error: --monitor-ref needs <lat,lon>")?;
+                    let f = |s: &str| {
+                        s.parse::<f64>()
+                            .map_err(|_| format!("error: --monitor-ref '{s}' is not numeric"))
+                    };
+                    (f(a)?, f(b)?)
+                }
+                None => {
+                    return Err("error: --wind-terrain needs --monitor-ref <lat,lon>".to_string())
+                }
+            };
+            if !wind_zones.is_empty() {
+                return Err("error: --wind-terrain conflicts with --wind-zone".to_string());
+            }
+            Some(TerrainSpec {
+                dem_path,
+                monitors_path,
+                ref_lat,
+                ref_lon,
+                north_azimuth: monitor_north_azimuth,
+            })
+        }
+        _ => return Err("error: --wind-dem and --wind-monitors go together".to_string()),
+    };
     let recover_main = match (recover_main, recover) {
         (Some(_), None) => return Err("error: --recover-main needs --recover".to_string()),
         (Some(cd_area), Some(_)) => Some((
@@ -1075,6 +1150,8 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
         wind_zones,
         #[cfg(feature = "ballistics")]
         wind_profile,
+        #[cfg(feature = "ballistics")]
+        wind_terrain,
         #[cfg(feature = "ballistics")]
         turbulence,
         #[cfg(feature = "ballistics")]
@@ -1370,6 +1447,62 @@ pub(crate) fn run_trajectory(
         }
         (d, c, cn, k, cp_, cgd, cgp, pi)
     };
+    // One shared wind field for the forces, weathercock and recovery: either
+    // a profile (or terrain-adjusted field built from a DEM plus monitors)
+    // or nothing.
+    #[cfg(feature = "ballistics")]
+    let shared_wind: Option<std::sync::Arc<dyn winds_engine::WindField + Send + Sync>> =
+        match &opts.wind_terrain {
+            Some(spec) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let dem_text = std::fs::read_to_string(&spec.dem_path)
+                        .map_err(|e| format!("error: could not read DEM: {e}"))?;
+                    let grid = winds_engine::HeightGrid::from_ascii(&dem_text)
+                        .map_err(|e| format!("error: {e}"))?;
+                    let monitor_text = std::fs::read_to_string(&spec.monitors_path)
+                        .map_err(|e| format!("error: could not read monitors: {e}"))?;
+                    let monitors = winds_engine::monitors_from_geo_csv(
+                        &monitor_text,
+                        spec.ref_lat,
+                        spec.ref_lon,
+                        spec.north_azimuth,
+                    )
+                    .map_err(|e| format!("error: {e}"))?;
+                    let base: std::sync::Arc<dyn winds_engine::WindField + Send + Sync> =
+                        match &opts.wind_profile {
+                            Some(p) => std::sync::Arc::new(p.clone()),
+                            None => {
+                                let w = opts.wind_mps;
+                                std::sync::Arc::new(winds_engine::ConstantField {
+                                    wind: winds_engine::Wind {
+                                        x_mps: w.x,
+                                        y_mps: w.y,
+                                        z_mps: w.z,
+                                    },
+                                })
+                            }
+                        };
+                    let field = winds_engine::TerrainFlowField::adjust(
+                        grid,
+                        base.as_ref(),
+                        &monitors,
+                        TERRAIN_LEVELS_AGL,
+                        TERRAIN_OBS_LENGTH_M,
+                        TERRAIN_SURFACE_DECAY_M,
+                        TERRAIN_SCALE_M,
+                    )
+                    .map_err(|e| format!("error: {e}"))?;
+                    Some(std::sync::Arc::new(field))
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = spec;
+                    return Err("error: --wind-terrain is native CLI only".to_string());
+                }
+            }
+            None => opts.wind_profile.as_ref().map(|p| wind_field_arc(p)),
+        };
     #[cfg(feature = "ballistics")]
     let use_drag = diameter_m.is_some() || cd.is_some();
     #[cfg(feature = "ballistics")]
@@ -1458,10 +1591,8 @@ pub(crate) fn run_trajectory(
                         .with_wind_segments(opts.wind_zones.clone())
                         .map_err(fmt_err)?;
                 }
-                if let Some(profile) = &opts.wind_profile {
-                    forces = forces
-                        .with_wind_field(wind_field_arc(profile))
-                        .map_err(fmt_err)?;
+                if let Some(field) = &shared_wind {
+                    forces = forces.with_wind_field(field.clone()).map_err(fmt_err)?;
                 }
                 if let Some((sigma, tau)) = opts.turbulence {
                     forces = forces
@@ -1529,10 +1660,8 @@ pub(crate) fn run_trajectory(
                 .with_wind_segments(opts.wind_zones.clone())
                 .map_err(fmt_err)?;
         }
-        if let Some(profile) = &opts.wind_profile {
-            recovery = recovery
-                .with_wind_field(wind_field_arc(profile))
-                .map_err(fmt_err)?;
+        if let Some(field) = &shared_wind {
+            recovery = recovery.with_wind_field(field.clone()).map_err(fmt_err)?;
         }
         base = Forces::Recovered(Box::new(recovery));
     }
@@ -1577,9 +1706,9 @@ pub(crate) fn run_trajectory(
                 .with_wind_segments(opts.wind_zones.clone())
                 .map_err(fmt_err)?;
         }
-        if let Some(profile) = &opts.wind_profile {
+        if let Some(field) = &shared_wind {
             weathercock = weathercock
-                .with_wind_field(wind_field_arc(profile))
+                .with_wind_field(field.clone())
                 .map_err(fmt_err)?;
         }
         guidance_base = Box::new(weathercock);
@@ -2144,6 +2273,34 @@ mod tests {
         ))
         .unwrap_err();
         assert!(err.contains("--recover-main needs --recover"), "got {err}");
+    }
+
+    #[cfg(feature = "ballistics")]
+    #[test]
+    fn wind_terrain_flies_with_monitors() {
+        let dem = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/ridge_dem.asc");
+        let monitors = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/monitors.csv");
+        let out = run(&argv(&format!(
+            "simulate --motor estes:d12 \
+             --geometry nose=ogive:0.07:0.024,tube=0.2:0.024,fins=3:0.05:0.03:0.05:0.02:0.0032 \
+             --geometry-masses 0.00427,0.00741,0.01306 --weathercock --rail 1 \
+             --wind-dem {dem} --wind-monitors {monitors} --monitor-ref 45.0,0.0 \
+             --recover 0.25 --duration-s 20 --dt-s 0.5"
+        )))
+        .unwrap();
+        assert!(out.contains("apogee"), "got {out}");
+        // DEM and monitors must be given together.
+        let err = run(&argv(&format!(
+            "simulate --motor estes:d12 --wind-dem {dem} --dry-mass 0.1"
+        )))
+        .unwrap_err();
+        assert!(err.contains("go together"), "got {err}");
+        // The geo reference is required.
+        let err = run(&argv(&format!(
+            "simulate --motor estes:d12 --wind-dem {dem} --wind-monitors {monitors} --dry-mass 0.1"
+        )))
+        .unwrap_err();
+        assert!(err.contains("--monitor-ref"), "got {err}");
     }
 
     #[cfg(feature = "ballistics")]

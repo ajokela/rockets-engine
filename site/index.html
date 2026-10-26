@@ -143,7 +143,7 @@
 <body>
 <main>
   <header>
-    <h1>rockets-engine <span class="ver">v0.18.0</span></h1>
+    <h1>rockets-engine <span class="ver">v0.19.0</span></h1>
     <p class="tagline">Point-mass powered flight for Rust — prescribed motor burns, staging and guidance hooks on the ballistics-engine force kernel.</p>
     <svg class="rocket-arc" viewBox="0 0 780 170" aria-hidden="true">
       <path id="flight" class="trail" d="M -50 160 Q 390 -80 830 160" fill="none" stroke-width="1.5"/>
@@ -160,7 +160,7 @@
     </svg>
   </header>
 
-  <div class="install"><span class="p"># Cargo.toml</span><br>rockets-engine = "0.18"</div>
+  <div class="install"><span class="p"># Cargo.toml</span><br>rockets-engine = "0.19"</div>
 
   <h2>What it does</h2>
   <ul>
@@ -216,7 +216,7 @@
     }
     <span class="t">Ok</span>(())
 }</code></pre>
-  <p class="code-note">In Cargo.toml: <code>rockets-engine = "0.18"</code>; add <code>ballistics-engine = "=0.48.0"</code> only if you call its API directly. Full source: <a href="https://github.com/ajokela/rockets-engine/blob/main/examples/with_ballistics.rs">examples/with_ballistics.rs</a>. Flying something unpowered? Drive <a href="https://docs.rs/ballistics-engine">ballistics-engine</a> directly instead.</p>
+  <p class="code-note">In Cargo.toml: <code>rockets-engine = "0.19"</code>; add <code>ballistics-engine = "=0.48.0"</code> only if you call its API directly. Full source: <a href="https://github.com/ajokela/rockets-engine/blob/main/examples/with_ballistics.rs">examples/with_ballistics.rs</a>. Flying something unpowered? Drive <a href="https://docs.rs/ballistics-engine">ballistics-engine</a> directly instead.</p>
 
   <h2>Model a rocket from geometry</h2>
   <p>Describe the airframe instead of guessing curves. The Barrowman modeler turns nose, tube and fin geometry into Cd/Cnα/CP, the weathercock uses CP/CG for stability, and the recovery model brings it home. One command exercises the whole stack:</p>

@@ -631,7 +631,7 @@ checksum = "60a357793950651c4ed0f3f52338f53b2f809f32d83a07f72909fa13e4c6c1e3"
 
 [[package]]
 name = "rockets-engine"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "ballistics-engine",
  "nalgebra",
@@ -945,9 +945,9 @@ dependencies = [
 
 [[package]]
 name = "winds-engine"
-version = "0.2.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "512899b48acdf6e1c726678c3289efab4c6169013e5926a88b35a29c56bec3f5"
+checksum = "1ded8dc26ed69077692f0e522fbc122415d532e4a8b5898354354d72fddf6724"
 dependencies = [
  "grib",
 ]
