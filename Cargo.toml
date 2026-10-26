@@ -1,6 +1,6 @@
 [package]
 name = "rockets-engine"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2021"
 rust-version = "1.89"
 authors = ["Alex Jokela <email@tinycomputers.io>"]
@@ -28,7 +28,7 @@ model = []
 
 [dependencies]
 ballistics-engine = { version = "=0.48.0", default-features = false, optional = true }
-winds-engine = { version = "=0.1.1", default-features = false, optional = true }
+winds-engine = { version = "=0.2.0", default-features = false, features = ["grib"], optional = true }
 nalgebra = { version = "0.35", default-features = false, features = ["std"] }
 serde = { version = "1.0", features = ["derive"], optional = true }
 # Pinned to the wasm-bindgen CLI on the build machines; the CLI and the crate

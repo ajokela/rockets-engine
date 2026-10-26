@@ -12,7 +12,7 @@ The crate is published on crates.io and consumes `ballistics-engine` 0.48.0 from
 
 ```toml
 [dependencies]
-rockets-engine = "0.17"
+rockets-engine = "0.18"
 ```
 
 ## Run
@@ -135,7 +135,7 @@ This baseline follows the thrust-curve, propellant-mass, gravity and drag struct
 - `RailForces` wraps any force model and projects environmental acceleration onto a launch rail until exit; command the thrust axis along the rail and no steering until exit, then let tip-off take over.
 - `BoxedGuidance`/`BoxedForces` are type-erased handles for heterogeneous decorator/model chains.
 - `with_atmosphere_zones` and `with_wind_segments` on `BallisticForces` expose the upstream downrange-segmented atmosphere and wind ladders, evaluated statelessly at each stage's downrange position. Body lift reads the zoned air too, and `RecoveryForces` and `Weathercock` take the same ladder through their own `with_atmosphere_zones`, so every force reads the drag kernel's air.
-- `with_wind_field(field)` samples any [winds-engine](https://github.com/ajokela/winds-engine) `WindField` — vertical profiles, log/Ekman boundary layers, or a radiosonde sounding — instead of the uniform vector or zone ladder. The field is shared (`Arc`) with the weathercock and the recovery descent, so attitude and drift respond to the same air the drag sees, stateless and deterministic. CLI: `--wind-profile alt:speed:dir,...` (altitude above sea level m, speed m/s, FROM-direction deg) or `--wind-sounding file` (a radiosonde in winds-engine's interchange format, native CLI). Turbulence composes on top of any of these.
+- `with_wind_field(field)` samples any [winds-engine](https://github.com/ajokela/winds-engine) `WindField` — vertical profiles, log/Ekman boundary layers, a radiosonde sounding, or a GRIB2 forecast grid — instead of the uniform vector or zone ladder. The field is shared (`Arc`) with the weathercock and the recovery descent, so attitude and drift respond to the same air the drag sees, stateless and deterministic. CLI: `--wind-profile alt:speed:dir,...` (altitude above sea level m, speed m/s, FROM-direction deg), `--wind-sounding file` (radiosonde), or `--wind-grib file --grib-point lat,lon [--grib-azimuth-deg deg]` (GFS GRIB2 forecast winds, native CLI). Turbulence composes on top of any of these.
 - `with_turbulence(sigma, tau, seed)` adds deterministic frozen-field gusts: eight multisine components per axis with a pink (1/f) spectrum, RMS `sigma` per axis and energy near the period `tau` (default 2 s via `--turbulence-tau`). Stateless, so RK4 substeps, snapshots, replays and `--seed` reproduction all see identical wind at identical times; dispersion reseeds per run so every Monte-Carlo sample gets its own gust realization. The weathercock and the recovery descent take the same gust field and the same wind-zone ladder, so attitude and drift respond to the same air the drag sees. CLI: `--turbulence <sigma_mps>`.
 
 The atmospheric adapter uses the body's own Cd-versus-Mach curve and updates both SI mass and the engine's imperial mass mirror. It includes gravity and drag; bullet-specific reference-BC and postprocessing effects (Litz spin drift) are disabled. Standard atmosphere delegates to the upstream altitude model: humidity affects density, while this derivative path uses dry-air sound speed. Uniform atmosphere obeys the upstream direct-mode limits (`0 ≤ density < 2 kg/m³`, sound speed `> 200 m/s`); a zero density retains gravity but removes drag. `UniformGravity(Vec3::zeros())` gives an inertial vacuum.

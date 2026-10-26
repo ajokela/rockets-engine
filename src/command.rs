@@ -151,6 +151,9 @@ fn help() -> String {
      \x20                            deg (0=headwind)\n\
      \x20 --wind-sounding <path>   radiosonde file as the profile, heights\n\
      \x20                            above sea level (native CLI)\n\
+     \x20 --wind-grib <path>       GRIB2 forecast file as the profile (native CLI)\n\
+     \x20 --grib-point <lat,lon>   where in the grid to sample (required)\n\
+     \x20 --grib-azimuth-deg <deg> compass direction of the downrange axis [0]\n\
      \x20 --turbulence <sigma>     deterministic gust RMS per axis, m/s [0]\n\
      \x20 --turbulence-tau <s>     gust correlation period [2.0]\n\
      \x20 --atmo-zone <t:p:h:u>    atmosphere zone, repeatable: temp C,\n\
@@ -538,6 +541,12 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     #[cfg(feature = "ballistics")]
     let mut wind_sounding = None;
     #[cfg(feature = "ballistics")]
+    let mut wind_grib = None;
+    #[cfg(feature = "ballistics")]
+    let mut grib_point = None;
+    #[cfg(feature = "ballistics")]
+    let mut grib_azimuth_deg = 0.0_f64;
+    #[cfg(feature = "ballistics")]
     let mut wind_zones = Vec::new();
     #[cfg(feature = "ballistics")]
     let mut atmo_zones = Vec::new();
@@ -698,6 +707,12 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
             #[cfg(feature = "ballistics")]
             "--wind-sounding" => wind_sounding = Some(value(flag)?),
             #[cfg(feature = "ballistics")]
+            "--wind-grib" => wind_grib = Some(value(flag)?),
+            #[cfg(feature = "ballistics")]
+            "--grib-point" => grib_point = Some(value(flag)?),
+            #[cfg(feature = "ballistics")]
+            "--grib-azimuth-deg" => grib_azimuth_deg = parse_f64(&value(flag)?, flag)?,
+            #[cfg(feature = "ballistics")]
             "--turbulence" => turbulence = Some(parse_f64(&value(flag)?, flag)?),
             #[cfg(feature = "ballistics")]
             "--turbulence-tau" => turbulence_tau = Some(parse_f64(&value(flag)?, flag)?),
@@ -804,11 +819,14 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     }
     #[cfg(feature = "ballistics")]
     let wind_profile = {
-        let parsed = match (wind_profile, wind_sounding) {
-            (Some(_), Some(_)) => {
-                return Err("error: use only one of --wind-profile and --wind-sounding".to_string())
+        let parsed = match (wind_profile, wind_sounding, wind_grib) {
+            (Some(_), Some(_), _) | (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
+                return Err(
+                    "error: use only one of --wind-profile, --wind-sounding and --wind-grib"
+                        .to_string(),
+                )
             }
-            (Some(spec), None) => {
+            (Some(spec), None, None) => {
                 let mut levels = Vec::new();
                 for entry in spec.split(',') {
                     let fields: Vec<&str> = entry.split(':').collect();
@@ -828,7 +846,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
                 }
                 Some(winds_engine::ProfileField::new(levels).map_err(|e| format!("error: {e}"))?)
             }
-            (None, Some(path)) => {
+            (None, Some(path), None) => {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     let text = std::fs::read_to_string(&path)
@@ -849,7 +867,37 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
                     );
                 }
             }
-            (None, None) => None,
+            (None, None, Some(path)) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let point = grib_point
+                        .ok_or("error: --wind-grib needs --grib-point <lat,lon>".to_string())?;
+                    let (lat, lon) = {
+                        let (a, b) = point
+                            .split_once(',')
+                            .ok_or("error: --grib-point needs <lat,lon>".to_string())?;
+                        let f = |s: &str| {
+                            s.parse::<f64>()
+                                .map_err(|_| format!("error: --grib-point '{s}' is not numeric"))
+                        };
+                        (f(a)?, f(b)?)
+                    };
+                    let bytes = std::fs::read(&path)
+                        .map_err(|e| format!("error: could not read grib file: {e}"))?;
+                    Some(
+                        winds_engine::grib::profile_from_grib2(&bytes, lat, lon, grib_azimuth_deg)
+                            .map_err(|e| format!("error: {e}"))?,
+                    )
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = path;
+                    let _ = grib_point;
+                    let _ = grib_azimuth_deg;
+                    return Err("error: --wind-grib reads files and is native CLI only".to_string());
+                }
+            }
+            (None, None, None) => None,
         };
         if parsed.is_some() && (wind_mps != Vec3::zeros() || !wind_zones.is_empty()) {
             return Err(
@@ -2134,6 +2182,38 @@ mod tests {
         )))
         .unwrap();
         assert!(out.contains("apogee"), "got {out}");
+    }
+
+    #[cfg(feature = "ballistics")]
+    #[test]
+    fn wind_grib_flies_forecast_wind() {
+        // Golden file: GFS 2026-10-26 00Z analysis, 850/700/500 mb over
+        // Minneapolis (same file as winds-engine's golden test).
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/gfs_20261026_00z_mpx.grib2"
+        );
+        let out = run(&argv(&format!(
+            "simulate --motor estes:d12 \
+             --geometry nose=ogive:0.07:0.024,tube=0.2:0.024,fins=3:0.05:0.03:0.05:0.02:0.0032 \
+             --geometry-masses 0.00427,0.00741,0.01306 --weathercock --rail 1 \
+             --wind-grib {path} --grib-point 44.883,-93.233 --recover 0.25 --duration-s 20 --dt-s 0.5"
+        )))
+        .unwrap();
+        assert!(out.contains("apogee"), "got {out}");
+        // Point is required.
+        let err = run(&argv(&format!(
+            "simulate --motor estes:d12 --wind-grib {path} --dry-mass 0.1"
+        )))
+        .unwrap_err();
+        assert!(err.contains("--grib-point"), "got {err}");
+        // Conflicts with the other wind sources.
+        let err = run(&argv(&format!(
+            "simulate --motor estes:d12 --wind-grib {path} --grib-point 44.883,-93.233 \
+             --wind-profile 0:0:0,500:5:0 --dry-mass 0.1"
+        )))
+        .unwrap_err();
+        assert!(err.contains("use only one of"), "got {err}");
     }
 
     #[cfg(feature = "ballistics")]
