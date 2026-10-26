@@ -66,20 +66,28 @@ jobs:
           a8=$(awk '/^APOGEE_A8 / { print $2 }' out.txt)
           d21=$(awk '/^APOGEE_D21 / { print $2 }' out.txt)
           g64=$(awk '/^APOGEE_G64 / { print $2 }' out.txt)
-          test -n "$a8" && test -n "$d21" && test -n "$g64"
+          beta=$(awk '/^APOGEE_BETA / { print $2 }' out.txt)
+          test -n "$a8" && test -n "$d21" && test -n "$g64" && test -n "$beta"
           echo "a8=$a8" >> "$GITHUB_OUTPUT"
           echo "d21=$d21" >> "$GITHUB_OUTPUT"
           echo "g64=$g64" >> "$GITHUB_OUTPUT"
+          echo "beta=$beta" >> "$GITHUB_OUTPUT"
       - name: Sanity-check the references
         # Guards against a wrong/corrupt jar: the fixture apogees must land
-        # within 5% of the recorded 24.12 values (409.63/697.02/1112.14 m).
+        # within 5% of the recorded 24.12 values (409.63/697.02/1112.14/845.27 m).
         run: |
           awk -v a="${{ steps.openrocket.outputs.a8 }}" 'BEGIN { exit (a < 389.1 || a > 430.1) }'
           awk -v a="${{ steps.openrocket.outputs.d21 }}" 'BEGIN { exit (a < 662.2 || a > 731.9) }'
           awk -v a="${{ steps.openrocket.outputs.g64 }}" 'BEGIN { exit (a < 1056.5 || a > 1167.7) }'
+          awk -v a="${{ steps.openrocket.outputs.beta }}" 'BEGIN { exit (a < 803.0 || a > 887.5) }'
       - name: Flight parity against live OpenRocket
         env:
           ROCKETS_OPENROCKET_APOGEE_M: ${{ steps.openrocket.outputs.a8 }}
           ROCKETS_OPENROCKET_D21_APOGEE_M: ${{ steps.openrocket.outputs.d21 }}
           ROCKETS_OPENROCKET_G64_APOGEE_M: ${{ steps.openrocket.outputs.g64 }}
+          ROCKETS_OPENROCKET_BETA_APOGEE_M: ${{ steps.openrocket.outputs.beta }}
         run: cargo test --all-features openrocket_flight_parity
+      - name: Staging parity against live OpenRocket
+        env:
+          ROCKETS_OPENROCKET_BETA_APOGEE_M: ${{ steps.openrocket.outputs.beta }}
+        run: cargo test --all-features openrocket_staging_parity

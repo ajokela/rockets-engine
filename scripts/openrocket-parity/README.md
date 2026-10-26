@@ -30,6 +30,16 @@ finish / no launch lug):
 | A8 (9 N·s) | subsonic, max Mach 0.42 | 409.64 m | 390.11 m | −4.8 % |
 | D21 (32 N·s) | transonic, max Mach 0.85 | 697.02 m | 678.12 m | −2.7 % |
 | G64 (128 N·s, synthetic) | supersonic, max Mach 1.60 | 1112.14 m | 1085.71 m | −2.4 % |
+| Beta (two-stage, B4/D21) | staging, sep at t = 2.0 s | 845.27 m | 831.62 m | −1.6 % |
+
+The Beta flight pins staging: booster ignition at t = 0, booster burnout
+and separation at t = 2.0 (254.2 m), sustainer ignition the same instant.
+Our model flies it as `--stage` (booster) + a zero-dry-mass sustainer-burn
+stage with ignition at 2.0. Since one Mach-indexed drag curve cannot
+follow a separating airframe, the curve is OpenRocket's printed stack Cd
+below the separation speed (Mach 0.5) and the sustainer-only Alpha III
+curve above it; that blend lands −1.6 %, and the test also asserts the
+booster's dry mass leaves at separation.
 
 The G64 motor is synthetic by design: parity needs identical inputs, not a
 real motor file. It exists to push the Alpha III airframe past Mach 1.

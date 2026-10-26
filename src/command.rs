@@ -2324,6 +2324,51 @@ mod tests {
 
     #[cfg(feature = "ballistics")]
     #[test]
+    fn openrocket_staging_parity_beta() {
+        // OpenRocket's TestRockets.makeBeta(): Alpha III sustainer (B4)
+        // over a D21 booster, separating at booster burnout (t = 2.0) with
+        // immediate sustainer ignition. Our model: the sustainer's burn is
+        // a zero-dry-mass stage; the drag curve is OpenRocket's printed
+        // stack curve below the separation speed (Mach 0.5) and the
+        // sustainer-only Alpha III curve above it.
+        let out = run(&argv(
+            "simulate --diameter-m 0.024 \
+             --cd 0:0.78,0.24:0.827,0.36:0.902,0.48:1.032,0.5:0.796,0.6:0.796,0.8:1.14,3:1.269 \
+             --dry-mass 0.03761 \
+             --stage 'dry=0.03069,prop=0.0096,curve=0:0;1:32;2:0,ignition=0,sep=2.0' \
+             --stage 'dry=0.0,prop=0.0065,curve=0:0;1:11.4;2:0,ignition=2.0' \
+             --duration-s 30 --dt-s 0.5",
+        ))
+        .unwrap();
+        let apogee: f64 = out
+            .split_whitespace()
+            .skip_while(|t| *t != "apogee")
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .expect("apogee line");
+        let reference: f64 = std::env::var("ROCKETS_OPENROCKET_BETA_APOGEE_M")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(845.27);
+        assert!(
+            (apogee - reference).abs() / reference < 0.10,
+            "apogee {apogee} vs OpenRocket {reference}"
+        );
+        // The booster (30.69 g dry) leaves at separation: t = 1.5 vs 2.5 s.
+        let masses: Vec<f64> = out
+            .lines()
+            .filter_map(|l| l.split_whitespace().nth(5)?.parse().ok())
+            .collect();
+        assert!(
+            masses[3] - masses[5] > 0.03,
+            "mass drop at separation: {} -> {}",
+            masses[3],
+            masses[5]
+        );
+    }
+
+    #[cfg(feature = "ballistics")]
+    #[test]
     fn geometry_masses_estimate_cg_and_inertia() {
         // No --dry-mass/--cg-dry-m/--cg-prop-m/--pitch-inertia: the mass
         // model fills them from the geometry and the motor file.

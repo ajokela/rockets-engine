@@ -159,5 +159,73 @@ public class Apogee {
         // motor; parity needs identical inputs, not provenance.
         double g64 = fly(preparedRocket(), motor("G64", 128.0, 0.040, 0.030, 0.020));
         System.out.printf("APOGEE_G64 %.4f%n", g64);
+
+        // Beta: the fixture's two-stage kit-bash (B4 sustainer over a D21
+        // booster), pinning staging: separation and upper ignition times
+        // and altitudes plus the stack's drag curve.
+        Rocket beta = TestRockets.makeBeta();
+        java.util.List<RocketComponent> betaRemove = new java.util.ArrayList<>();
+        for (RocketComponent c : beta) {
+            if (c instanceof info.openrocket.core.rocketcomponent.TrapezoidFinSet) {
+                ((info.openrocket.core.rocketcomponent.TrapezoidFinSet) c)
+                        .setCrossSection(info.openrocket.core.rocketcomponent.FinSet.CrossSection.ROUNDED);
+            }
+            if (c instanceof info.openrocket.core.rocketcomponent.ExternalComponent) {
+                ((info.openrocket.core.rocketcomponent.ExternalComponent) c)
+                        .setFinish(info.openrocket.core.rocketcomponent.ExternalComponent.Finish.SMOOTH);
+            }
+            if (c instanceof info.openrocket.core.rocketcomponent.LaunchLug) {
+                betaRemove.add(c);
+            }
+        }
+        for (RocketComponent c : betaRemove) {
+            c.getParent().removeChild(c);
+        }
+        for (RocketComponent c : beta) {
+            double m = c.getComponentMass();
+            if (m > 0.0) {
+                System.out.printf("BMASS %-28s %8.5f cg=%.4f%n",
+                        c.getComponentName(), m, c.getComponentCG().x);
+            }
+        }
+        Simulation bsim = new Simulation(beta);
+        SimulationOptions bopts = bsim.getOptions();
+        bopts.setISAAtmosphere(true);
+        bopts.setTimeStep(0.05);
+        PinkNoiseWindModel bwind = bopts.getAverageWindModel();
+        bwind.setAverage(0.0);
+        bwind.setStandardDeviation(0.0);
+        bsim.simulate();
+        FlightData bdata = bsim.getSimulatedData();
+        System.out.printf("APOGEE_BETA %.4f%n", bdata.getMaxAltitude());
+        info.openrocket.core.simulation.FlightDataBranch bb = bdata.getBranch(0);
+        java.util.List<Double> bts = bb.get(info.openrocket.core.simulation.FlightDataType.TYPE_TIME);
+        java.util.List<Double> balts = bb.get(info.openrocket.core.simulation.FlightDataType.TYPE_ALTITUDE);
+        java.util.List<Double> bmachs = bb.get(info.openrocket.core.simulation.FlightDataType.TYPE_MACH_NUMBER);
+        java.util.List<Double> bcds = bb.get(info.openrocket.core.simulation.FlightDataType.TYPE_DRAG_COEFF);
+        for (info.openrocket.core.simulation.FlightEvent event : bb.getEvents()) {
+            if (event.getType() == info.openrocket.core.simulation.FlightEvent.Type.IGNITION
+                    || event.getType() == info.openrocket.core.simulation.FlightEvent.Type.BURNOUT
+                    || event.getType() == info.openrocket.core.simulation.FlightEvent.Type.STAGE_SEPARATION) {
+                double t = event.getTime();
+                double alt = 0.0;
+                for (int i = 1; i < bts.size(); i++) {
+                    if (bts.get(i) >= t) {
+                        alt = balts.get(i - 1);
+                        break;
+                    }
+                }
+                System.out.printf("EVENT %-18s t=%.3f alt=%.2f src=%s%n",
+                        event.getType(), t, alt,
+                        event.getSource() == null ? "" : event.getSource().getName());
+            }
+        }
+        double lastM = -1;
+        for (int i = 0; i < bmachs.size(); i++) {
+            if (bmachs.get(i) - lastM > 0.1) {
+                lastM = bmachs.get(i);
+                System.out.printf("BCD M=%.2f cd=%.4f t=%.2f%n", lastM, bcds.get(i), bts.get(i));
+            }
+        }
     }
 }
