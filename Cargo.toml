@@ -50,3 +50,7 @@ required-features = ["ballistics"]
 [[example]]
 name = "with_ballistics"
 required-features = ["ballistics"]
+
+[[example]]
+name = "wind_field_trajectory"
+required-features = ["ballistics"]
