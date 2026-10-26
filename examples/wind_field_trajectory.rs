@@ -17,9 +17,7 @@ use rockets_engine::{
     ControlInput, FlightState, IntegratorSettings, Motor, Rocket, Simulator, ThrustCurve,
     ThrustPoint, Vec3,
 };
-use winds_engine::{
-    HeightGrid, Monitor, ProfileField, ProfileLevel, TerrainFlowField, WindField,
-};
+use winds_engine::{HeightGrid, Monitor, ProfileField, ProfileLevel, TerrainFlowField, WindField};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ---- A synthetic ridge DEM (metres, x downrange / z cross-range). ----
@@ -73,20 +71,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("wind at 50 m AGL, moving downrange over the ridge:");
     for x in [-1200.0, -600.0, 0.0, 600.0, 1200.0] {
         let w = field.wind(0.0, [x, grid.height_at(x, 0.0) + 50.0, 0.0]);
-        println!("  x = {x:6} m   {:+.2} m/s east, {:+.2} m/s north   ({} m/s)", w.x_mps, w.z_mps, w.speed_mps());
+        println!(
+            "  x = {x:6} m   {:+.2} m/s east, {:+.2} m/s north   ({} m/s)",
+            w.x_mps,
+            w.z_mps,
+            w.speed_mps()
+        );
     }
     println!("wind at the crest (x = 0), climbing:");
     for agl in [10.0, 150.0, 500.0, 2000.0] {
         let w = field.wind(0.0, [0.0, grid.height_at(0.0, 0.0) + agl, 0.0]);
-        println!("  {agl:5} m AGL  {:+.2} m/s east, {:+.2} m/s north", w.x_mps, w.z_mps);
+        println!(
+            "  {agl:5} m AGL  {:+.2} m/s east, {:+.2} m/s north",
+            w.x_mps, w.z_mps
+        );
     }
 
     // ---- Fly a rocket through it vs still air. ----
     let curve = ThrustCurve::new(vec![
-        ThrustPoint { time_s: 0.0, thrust_n: 0.0 },
-        ThrustPoint { time_s: 0.1, thrust_n: 18.0 },
-        ThrustPoint { time_s: 0.8, thrust_n: 6.0 },
-        ThrustPoint { time_s: 1.0, thrust_n: 0.0 },
+        ThrustPoint {
+            time_s: 0.0,
+            thrust_n: 0.0,
+        },
+        ThrustPoint {
+            time_s: 0.1,
+            thrust_n: 18.0,
+        },
+        ThrustPoint {
+            time_s: 0.8,
+            thrust_n: 6.0,
+        },
+        ThrustPoint {
+            time_s: 1.0,
+            thrust_n: 0.0,
+        },
     ])?;
     let motor = Motor::new(curve, 0.012, 0.0)?; // 12 g propellant
     let rocket = Rocket::new(0.08, Some(motor))?;
@@ -126,12 +144,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Apply an optional wind field to a force model (None = calm air).
 trait WindFieldExt {
-    fn apply(self, wind: Option<Arc<dyn WindField + Send + Sync>>) -> Result<Self, rockets_engine::Error>
+    fn apply(
+        self,
+        wind: Option<Arc<dyn WindField + Send + Sync>>,
+    ) -> Result<Self, rockets_engine::Error>
     where
         Self: Sized;
 }
 impl WindFieldExt for BallisticForces {
-    fn apply(self, wind: Option<Arc<dyn WindField + Send + Sync>>) -> Result<Self, rockets_engine::Error> {
+    fn apply(
+        self,
+        wind: Option<Arc<dyn WindField + Send + Sync>>,
+    ) -> Result<Self, rockets_engine::Error> {
         match wind {
             Some(field) => self.with_wind_field(field),
             None => Ok(self),
