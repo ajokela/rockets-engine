@@ -255,7 +255,7 @@ pub(crate) struct Options {
     pub(crate) wind_zones: Vec<(f64, f64, f64, f64)>,
     #[cfg(feature = "ballistics")]
     pub(crate) wind_profile: Option<winds_engine::ProfileField>,
-    #[cfg(feature = "ballistics")]
+    #[cfg(all(feature = "ballistics", not(target_arch = "wasm32")))]
     pub(crate) wind_terrain: Option<TerrainSpec>,
     #[cfg(feature = "ballistics")]
     pub(crate) turbulence: Option<(f64, f64)>,
@@ -337,8 +337,10 @@ impl Ground {
     }
 }
 
-/// Terrain-adjusted wind: a DEM plus distributed surface monitors.
-#[cfg(feature = "ballistics")]
+/// Terrain-adjusted wind: a DEM plus distributed surface monitors. Native
+/// only — the wasm terminal rejects `--wind-terrain` at parse time, so this
+/// struct and its fields only ever exist in non-wasm builds.
+#[cfg(all(feature = "ballistics", not(target_arch = "wasm32")))]
 #[derive(Clone)]
 pub(crate) struct TerrainSpec {
     dem_path: String,
@@ -349,13 +351,13 @@ pub(crate) struct TerrainSpec {
 }
 
 /// Fixed terrain-model settings (documented; not flag-exposed yet).
-#[cfg(feature = "ballistics")]
+#[cfg(all(feature = "ballistics", not(target_arch = "wasm32")))]
 const TERRAIN_LEVELS_AGL: &[f64] = &[10.0, 50.0, 150.0, 500.0];
-#[cfg(feature = "ballistics")]
+#[cfg(all(feature = "ballistics", not(target_arch = "wasm32")))]
 const TERRAIN_OBS_LENGTH_M: f64 = 1500.0;
-#[cfg(feature = "ballistics")]
+#[cfg(all(feature = "ballistics", not(target_arch = "wasm32")))]
 const TERRAIN_SURFACE_DECAY_M: f64 = 300.0;
-#[cfg(feature = "ballistics")]
+#[cfg(all(feature = "ballistics", not(target_arch = "wasm32")))]
 const TERRAIN_SCALE_M: f64 = 400.0;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -573,13 +575,13 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
     let mut grib_point = None;
     #[cfg(feature = "ballistics")]
     let mut grib_azimuth_deg = 0.0_f64;
-    #[cfg(feature = "ballistics")]
+    #[cfg(all(feature = "ballistics", not(target_arch = "wasm32")))]
     let mut wind_dem = None;
-    #[cfg(feature = "ballistics")]
+    #[cfg(all(feature = "ballistics", not(target_arch = "wasm32")))]
     let mut wind_monitors = None;
-    #[cfg(feature = "ballistics")]
+    #[cfg(all(feature = "ballistics", not(target_arch = "wasm32")))]
     let mut monitor_ref = None;
-    #[cfg(feature = "ballistics")]
+    #[cfg(all(feature = "ballistics", not(target_arch = "wasm32")))]
     let mut monitor_north_azimuth = 0.0_f64;
     #[cfg(feature = "ballistics")]
     let mut wind_zones = Vec::new();
@@ -747,13 +749,13 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
             "--grib-point" => grib_point = Some(value(flag)?),
             #[cfg(feature = "ballistics")]
             "--grib-azimuth-deg" => grib_azimuth_deg = parse_f64(&value(flag)?, flag)?,
-            #[cfg(feature = "ballistics")]
+            #[cfg(all(feature = "ballistics", not(target_arch = "wasm32")))]
             "--wind-dem" => wind_dem = Some(value(flag)?),
-            #[cfg(feature = "ballistics")]
+            #[cfg(all(feature = "ballistics", not(target_arch = "wasm32")))]
             "--wind-monitors" => wind_monitors = Some(value(flag)?),
-            #[cfg(feature = "ballistics")]
+            #[cfg(all(feature = "ballistics", not(target_arch = "wasm32")))]
             "--monitor-ref" => monitor_ref = Some(value(flag)?),
-            #[cfg(feature = "ballistics")]
+            #[cfg(all(feature = "ballistics", not(target_arch = "wasm32")))]
             "--monitor-north-azimuth" => monitor_north_azimuth = parse_f64(&value(flag)?, flag)?,
             #[cfg(feature = "ballistics")]
             "--turbulence" => turbulence = Some(parse_f64(&value(flag)?, flag)?),
@@ -950,7 +952,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
         }
         parsed
     };
-    #[cfg(feature = "ballistics")]
+    #[cfg(all(feature = "ballistics", not(target_arch = "wasm32")))]
     let wind_terrain = match (wind_dem, wind_monitors) {
         (None, None) => None,
         (Some(dem_path), Some(monitors_path)) => {
@@ -1150,7 +1152,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Args, String> {
         wind_zones,
         #[cfg(feature = "ballistics")]
         wind_profile,
-        #[cfg(feature = "ballistics")]
+        #[cfg(all(feature = "ballistics", not(target_arch = "wasm32")))]
         wind_terrain,
         #[cfg(feature = "ballistics")]
         turbulence,
@@ -1450,50 +1452,45 @@ pub(crate) fn run_trajectory(
     // One shared wind field for the forces, weathercock and recovery: either
     // a profile (or terrain-adjusted field built from a DEM plus monitors)
     // or nothing.
-    #[cfg(feature = "ballistics")]
+    #[cfg(all(feature = "ballistics", not(target_arch = "wasm32")))]
     let shared_wind: Option<std::sync::Arc<dyn winds_engine::WindField + Send + Sync>> =
         match &opts.wind_terrain {
             Some(spec) => {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    let dem_text = std::fs::read_to_string(&spec.dem_path)
-                        .map_err(|e| format!("error: could not read DEM: {e}"))?;
-                    let grid = winds_engine::HeightGrid::from_ascii(&dem_text)
-                        .map_err(|e| format!("error: {e}"))?;
-                    let monitor_text = std::fs::read_to_string(&spec.monitors_path)
-                        .map_err(|e| format!("error: could not read monitors: {e}"))?;
-                    let monitors = winds_engine::monitors_from_geo_csv(
-                        &monitor_text,
-                        spec.ref_lat,
-                        spec.ref_lon,
-                        spec.north_azimuth,
-                    )
+                let dem_text = std::fs::read_to_string(&spec.dem_path)
+                    .map_err(|e| format!("error: could not read DEM: {e}"))?;
+                let grid = winds_engine::HeightGrid::from_ascii(&dem_text)
                     .map_err(|e| format!("error: {e}"))?;
-                    let base: std::sync::Arc<dyn winds_engine::WindField + Send + Sync> =
-                        match &opts.wind_profile {
-                            Some(p) => std::sync::Arc::new(p.clone()),
-                            None => std::sync::Arc::new(winds_engine::ConstantField(opts.wind_mps)),
-                        };
-                    let field = winds_engine::TerrainFlowField::adjust(
-                        grid,
-                        base.as_ref(),
-                        &monitors,
-                        TERRAIN_LEVELS_AGL,
-                        TERRAIN_OBS_LENGTH_M,
-                        TERRAIN_SURFACE_DECAY_M,
-                        TERRAIN_SCALE_M,
-                    )
-                    .map_err(|e| format!("error: {e}"))?;
-                    Some(std::sync::Arc::new(field))
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    let _ = spec;
-                    return Err("error: --wind-terrain is native CLI only".to_string());
-                }
+                let monitor_text = std::fs::read_to_string(&spec.monitors_path)
+                    .map_err(|e| format!("error: could not read monitors: {e}"))?;
+                let monitors = winds_engine::monitors_from_geo_csv(
+                    &monitor_text,
+                    spec.ref_lat,
+                    spec.ref_lon,
+                    spec.north_azimuth,
+                )
+                .map_err(|e| format!("error: {e}"))?;
+                let base: std::sync::Arc<dyn winds_engine::WindField + Send + Sync> =
+                    match &opts.wind_profile {
+                        Some(p) => std::sync::Arc::new(p.clone()),
+                        None => std::sync::Arc::new(winds_engine::ConstantField(opts.wind_mps)),
+                    };
+                let field = winds_engine::TerrainFlowField::adjust(
+                    grid,
+                    base.as_ref(),
+                    &monitors,
+                    TERRAIN_LEVELS_AGL,
+                    TERRAIN_OBS_LENGTH_M,
+                    TERRAIN_SURFACE_DECAY_M,
+                    TERRAIN_SCALE_M,
+                )
+                .map_err(|e| format!("error: {e}"))?;
+                Some(std::sync::Arc::new(field))
             }
             None => opts.wind_profile.as_ref().map(|p| wind_field_arc(p)),
         };
+    #[cfg(all(feature = "ballistics", target_arch = "wasm32"))]
+    let shared_wind: Option<std::sync::Arc<dyn winds_engine::WindField + Send + Sync>> =
+        opts.wind_profile.as_ref().map(|p| wind_field_arc(p));
     #[cfg(feature = "ballistics")]
     let use_drag = diameter_m.is_some() || cd.is_some();
     #[cfg(feature = "ballistics")]
