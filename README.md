@@ -6,13 +6,13 @@
 
 A Rust companion to [`ballistics-engine`](https://crates.io/crates/ballistics-engine) for powered, three-dimensional point-mass flight. It adds prescribed motor burns, changing mass, incremental RK4 integration and application-owned guidance hooks. The default adapter calls the existing ballistics-engine gravity/drag derivative function; it does not fork or modify that engine.
 
-The crate is published on crates.io and consumes `ballistics-engine` 0.48.0 from crates.io. Rust 1.99.1 is pinned for development, matching the game workspace.
+The crate is published on crates.io and consumes `ballistics-engine` 0.49.0 from crates.io. Rust 1.99.1 is pinned for development, matching the game workspace.
 
 ## Use
 
 ```toml
 [dependencies]
-rockets-engine = "0.19"
+rockets-engine = "0.20"
 ```
 
 ## Run

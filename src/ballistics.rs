@@ -627,13 +627,7 @@ impl BallisticForces {
     /// frozen-field turbulence if configured.
     fn effective_wind(&self, state: &FlightState) -> Vec3 {
         let base = match &self.wind_field {
-            Some(field) => {
-                let w = field.0.wind(
-                    state.time_s,
-                    [state.position_m.x, state.position_m.y, state.position_m.z],
-                );
-                Vec3::new(w.x_mps, w.y_mps, w.z_mps)
-            }
+            Some(field) => field.0.wind(state.time_s, state.position_m),
             None => match &self.wind_sock {
                 Some(sock) => sock.vector_for_range_stateless(state.position_m.x),
                 None => self.wind_mps,

@@ -70,20 +70,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ---- Show it is genuinely 3-D. ----
     println!("wind at 50 m AGL, moving downrange over the ridge:");
     for x in [-1200.0, -600.0, 0.0, 600.0, 1200.0] {
-        let w = field.wind(0.0, [x, grid.height_at(x, 0.0) + 50.0, 0.0]);
+        let w = field.wind(0.0, Vec3::new(x, grid.height_at(x, 0.0) + 50.0, 0.0));
         println!(
-            "  x = {x:6} m   {:+.2} m/s east, {:+.2} m/s north   ({} m/s)",
-            w.x_mps,
-            w.z_mps,
-            w.speed_mps()
+            "  x = {x:6} m   {:+.2} m/s east, {:+.2} m/s north   ({:.2} m/s)",
+            w.x,
+            w.z,
+            w.x.hypot(w.z)
         );
     }
     println!("wind at the crest (x = 0), climbing:");
     for agl in [10.0, 150.0, 500.0, 2000.0] {
-        let w = field.wind(0.0, [0.0, grid.height_at(0.0, 0.0) + agl, 0.0]);
+        let w = field.wind(0.0, Vec3::new(0.0, grid.height_at(0.0, 0.0) + agl, 0.0));
         println!(
             "  {agl:5} m AGL  {:+.2} m/s east, {:+.2} m/s north",
-            w.x_mps, w.z_mps
+            w.x, w.z
         );
     }
 

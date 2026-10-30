@@ -198,17 +198,7 @@ impl Guidance for Weathercock {
     fn command(&mut self, context: GuidanceContext<'_>) -> Result<ControlInput> {
         let dt = context.step_duration_s;
         let base_wind = match &self.wind_field {
-            Some(field) => {
-                let w = field.0.wind(
-                    context.state.time_s,
-                    [
-                        context.state.position_m.x,
-                        context.state.position_m.y,
-                        context.state.position_m.z,
-                    ],
-                );
-                Vec3::new(w.x_mps, w.y_mps, w.z_mps)
-            }
+            Some(field) => field.0.wind(context.state.time_s, context.state.position_m),
             None => match &self.wind_sock {
                 Some(sock) => sock.vector_for_range_stateless(context.state.position_m.x),
                 None => self.wind_mps,

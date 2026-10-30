@@ -1472,16 +1472,7 @@ pub(crate) fn run_trajectory(
                     let base: std::sync::Arc<dyn winds_engine::WindField + Send + Sync> =
                         match &opts.wind_profile {
                             Some(p) => std::sync::Arc::new(p.clone()),
-                            None => {
-                                let w = opts.wind_mps;
-                                std::sync::Arc::new(winds_engine::ConstantField {
-                                    wind: winds_engine::Wind {
-                                        x_mps: w.x,
-                                        y_mps: w.y,
-                                        z_mps: w.z,
-                                    },
-                                })
-                            }
+                            None => std::sync::Arc::new(winds_engine::ConstantField(opts.wind_mps)),
                         };
                     let field = winds_engine::TerrainFlowField::adjust(
                         grid,
