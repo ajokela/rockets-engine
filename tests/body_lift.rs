@@ -140,6 +140,24 @@ fn still_air_or_zero_axis_gives_no_increment() {
     assert_eq!(delta, Vec3::zeros());
 }
 
+/// Regression: at apogee a vertical flight reverses direction, so the
+/// relative wind is exactly anti-parallel to the (fixed, up-pointing) body
+/// axis. That is alpha = pi, not zero, but there is no perpendicular
+/// component, so the lift increment must be zero — not NaN from a 0/0
+/// `perp / sin_alpha`. This was a real crash: the geometry/body-lift path
+/// failed with "body lift returned non-finite acceleration" the instant a
+/// no-recovery flight crossed apogee.
+#[test]
+fn apogee_turnaround_is_zero_not_nan() {
+    let f = forces();
+    // Axis points up; velocity points straight down (post-apogee fall).
+    let axis = Vec3::new(0.0, 1.0, 0.0);
+    let falling = state_at(Vec3::new(0.0, -20.0, 0.0));
+    let delta = f.acceleration_with_axis(&falling, MASS, axis).unwrap()
+        - f.acceleration(&falling, MASS).unwrap();
+    assert_eq!(delta, Vec3::zeros(), "anti-parallel wind must add no lift");
+}
+
 #[test]
 fn body_lift_validates_its_tables() {
     let base = BallisticForces::new(

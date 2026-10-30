@@ -664,7 +664,11 @@ impl BallisticForces {
         let sin_alpha = perp.norm();
         let cos_alpha = axis.dot(&v_hat).clamp(-1.0, 1.0);
         let alpha = sin_alpha.atan2(cos_alpha);
-        if alpha < 1e-12 {
+        // Guard on the perpendicular component, not the angle: when the
+        // relative wind is aligned with the body axis (including the apogee
+        // turnaround, where alpha = pi), there is no lifting normal force yet
+        // `perp` is numerically zero, so `perp / sin_alpha` would be 0 / 0.
+        if sin_alpha < 1e-12 {
             return Ok(Vec3::zeros());
         }
         let (rho, sound) = self.air.at(state.position_m);
