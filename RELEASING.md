@@ -1,6 +1,8 @@
 # Releasing rockets-engine
 
 Step-by-step for cutting a release and shipping the site + downstream pin.
+Every step is the exact command this repo has been shipped with. Do not
+deviate without updating this file.
 Account-specific values (the AWS bucket, distribution and other
 infrastructure identifiers, and the downstream repository) live in the local,
 git-ignored AGENTS.md, not in this public file.
