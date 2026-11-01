@@ -12,7 +12,7 @@ documentation = "https://docs.rs/rockets-engine"
 readme = "README.md"
 keywords = ["rocket", "ballistics", "trajectory", "physics", "simulation"]
 categories = ["science", "simulation"]
-exclude = ["site/"]
+exclude = ["site/", "RELEASING.md"]
 
 [lib]
 # cdylib lets wasm-pack build the browser terminal; rlib serves every other consumer.
