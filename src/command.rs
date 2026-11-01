@@ -2406,6 +2406,34 @@ mod tests {
 
     #[cfg(feature = "ballistics")]
     #[test]
+    fn weathercock_apogee_does_not_depend_on_the_output_cadence() {
+        // The axis oscillator is stiff (ωₙ in the hundreds of rad/s at speed).
+        // One explicit axis update per 50 ms call flew this rocket to 213 m,
+        // against 372 m at 1 ms; the substepped axis has to agree with itself.
+        let base = "simulate --motor-eng 'Estes A8 18 70 0 0.0033 0.0164\\n0 0\\n1 9\\n2 0' \
+             --geometry nose=ogive:0.07:0.024,tube=0.2:0.024,fins=3:0.05:0.03:0.05:0.02:0.0032 \
+             --geometry-masses 0.00427,0.00741,0.01306 --weathercock --wind 4,0,0 \
+             --rail 1 --duration-s 15";
+        let apogee = |dt: &str| -> f64 {
+            let out = run(&argv(&format!("{base} --dt-s {dt}"))).unwrap();
+            out.split_whitespace()
+                .skip_while(|t| *t != "apogee")
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .expect("apogee line")
+        };
+        let fine = apogee("0.002");
+        for dt in ["0.05", "0.02"] {
+            let coarse = apogee(dt);
+            assert!(
+                (coarse - fine).abs() / fine < 0.01,
+                "dt {dt}: apogee {coarse} vs {fine} at 2 ms"
+            );
+        }
+    }
+
+    #[cfg(feature = "ballistics")]
+    #[test]
     fn turbulence_validates_its_numbers() {
         let base = "simulate --curve 0:0,1:10,1.5:0 --dry-mass 0.5 --propellant-mass 0.05 \
                     --diameter-m 0.05 --cd 0:0.4,3:0.4";

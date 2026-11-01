@@ -71,12 +71,21 @@ impl WeathercockParams {
     }
 }
 
+/// Largest ωₙ·h per axis substep in [`Weathercock`]: about 125 substeps per
+/// natural period, enough that the result no longer depends on the cadence.
+const MAX_OMEGA_H: f64 = 0.05;
+/// Bound on axis substeps in one public call, so a huge step stays cheap.
+const MAX_AXIS_SUBSTEPS: usize = 20_000;
+
 /// Second-order weathercock: the body axis relaxes toward the relative wind
 /// with natural frequency ωₙ² = q·A·Cnα·(CP−CG)/I and exponential damping
 /// 2ζωₙ. Positive static margin (CP aft of CG) is stable; negative margin
-/// diverges, as it should. The axis and rate are snapshot-able state, updated
-/// once per public step with an explicit first-order-in-dt scheme, so choose
-/// the public cadence well below the axis's natural period.
+/// diverges, as it should. The axis and rate are snapshot-able state, advanced
+/// once per public step: the step is integrated in substeps with ωₙ·h ≤ 0.05,
+/// with the relative wind and dynamic pressure held at their start-of-step
+/// values. The public cadence sets how often those are re-read and how long
+/// each commanded axis is held, so keep it short next to the flight's own
+/// time scales; it no longer has to resolve the natural period.
 #[derive(Debug, Clone)]
 pub struct Weathercock {
     params: WeathercockParams,
@@ -223,31 +232,42 @@ impl Guidance for Weathercock {
         let margin = self.params.cp_m.interpolate(mach) - self.cg_m(&context);
         let omega_sq = q * area * cna * margin / self.params.pitch_inertia_kg_m2;
 
-        // Restoring (or diverging) angular acceleration about axis × target.
-        // axis' = axis + (axis×target)×axis·dt rotates toward the target.
-        let cross = self.axis.cross(&target);
-        let anti_parallel = cross.norm() < 1e-12 && self.axis.dot(&target) < 0.0;
-        let cross = if anti_parallel && self.rate.norm() < 1e-12 {
-            // Exact inversion is an unstable equilibrium; seed a deterministic
-            // perturbation so the flip starts instead of sticking numerically.
-            let seed = if self.axis.z.abs() < 0.9 {
-                Vec3::z()
-            } else {
-                Vec3::y()
-            };
-            self.axis.cross(&seed).normalize() * 1e-6
-        } else {
-            cross
-        };
-        self.rate += cross * (omega_sq * dt);
+        // The axis is a stiff oscillator: on a small rocket at speed ωₙ reaches
+        // hundreds of rad/s, so a single explicit step over a 50 ms public call
+        // (ωₙ·dt ≈ 5) overshoots and aliases instead of settling into the wind.
+        // Integrate the call in substeps with ωₙ·h ≤ MAX_OMEGA_H, holding the
+        // relative wind, dynamic pressure and margin at their start-of-call
+        // values; the public cadence decides how often those are re-read.
         let omega = omega_sq.abs().sqrt();
-        if omega > 0.0 {
-            self.rate *= (-2.0 * self.params.damping_ratio * omega * dt).exp();
+        let substeps = ((omega * dt / MAX_OMEGA_H).ceil() as usize).clamp(1, MAX_AXIS_SUBSTEPS);
+        let h = dt / substeps as f64;
+        let decay = (-2.0 * self.params.damping_ratio * omega * h).exp();
+        for _ in 0..substeps {
+            // Restoring (or diverging) angular acceleration about axis × target.
+            // axis' = axis + (axis×target)×axis·h rotates toward the target.
+            let cross = self.axis.cross(&target);
+            let anti_parallel = cross.norm() < 1e-12 && self.axis.dot(&target) < 0.0;
+            let cross = if anti_parallel && self.rate.norm() < 1e-12 {
+                // Exact inversion is an unstable equilibrium; seed a deterministic
+                // perturbation so the flip starts instead of sticking numerically.
+                let seed = if self.axis.z.abs() < 0.9 {
+                    Vec3::z()
+                } else {
+                    Vec3::y()
+                };
+                self.axis.cross(&seed).normalize() * 1e-6
+            } else {
+                cross
+            };
+            self.rate += cross * (omega_sq * h);
+            if omega > 0.0 {
+                self.rate *= decay;
+            }
+            // Keep the rate perpendicular, then rotate the axis by rate·h.
+            self.rate -= self.axis * self.axis.dot(&self.rate);
+            let delta = self.rate.cross(&self.axis) * h;
+            self.axis = (self.axis + delta).normalize();
         }
-        // Keep the rate perpendicular, then rotate the axis by rate·dt.
-        self.rate -= self.axis * self.axis.dot(&self.rate);
-        let delta = self.rate.cross(&self.axis) * dt;
-        self.axis = (self.axis + delta).normalize();
         Ok(ControlInput::along(self.axis))
     }
 }
