@@ -50,7 +50,9 @@ pub(crate) fn dispersion(args: &[String]) -> Result<String, String> {
     let mut rng = SplitMix64(parsed.seed);
     let mut apogees = Vec::with_capacity(parsed.runs);
     let mut impacts: Vec<(f64, f64)> = Vec::with_capacity(parsed.runs);
-    for _ in 0..parsed.runs {
+    let mut unlanded = 0usize;
+    let mut end_time_s = 0.0_f64;
+    for run in 1..=parsed.runs {
         let mut opts = parsed.opts.clone();
         #[cfg(feature = "ballistics")]
         {
@@ -69,10 +71,22 @@ pub(crate) fn dispersion(args: &[String]) -> Result<String, String> {
         opts.speed_mps *= (1.0 + parsed.speed_sigma * rng.normal()).max(0.0);
         let (rows, _) = run_trajectory(&opts, true)?;
         let (peak, _) = apogee(&rows).ok_or("error: empty trajectory")?;
+        let left_ground = rows
+            .iter()
+            .any(|r| opts.ground.height_m(crate::Vec3::new(r.x, r.y, r.z)) > 0.0);
+        if !left_ground {
+            return Err(format!(
+                "error: run {run} never left the ground; check that thrust exceeds the vehicle's weight"
+            ));
+        }
         apogees.push(peak);
         if let Some(impact) = impact_row(&rows, &opts.ground) {
             impacts.push((impact.x, impact.z));
         } else if let Some(last) = rows.last() {
+            // Still airborne at the end of the run: its last position stands in
+            // for the impact, and the report says so.
+            unlanded += 1;
+            end_time_s = end_time_s.max(last.t);
             impacts.push((last.x, last.z));
         }
     }
@@ -83,10 +97,18 @@ pub(crate) fn dispersion(args: &[String]) -> Result<String, String> {
         .collect();
     let (mean_range, sd_range) = mean_sd(&ranges);
     let cep = circular_error_probable(&impacts);
-    Ok(format!(
+    let mut out = format!(
         "runs: {} (seed {})\napogee_m: mean {mean_apogee:.2}, sd {sd_apogee:.2}\nrange_m: mean {mean_range:.2}, sd {sd_range:.2}\nimpact CEP_m: {cep:.2}\n",
         parsed.runs, parsed.seed
-    ))
+    );
+    if unlanded > 0 {
+        out.push_str(&format!(
+            "warning: {unlanded} of {} runs had not landed when the run ended at t = {end_time_s:.1} s; \
+             range and CEP use their last positions, not impacts. Raise --duration-s.\n",
+            parsed.runs
+        ));
+    }
+    Ok(out)
 }
 
 fn mean_sd(values: &[f64]) -> (f64, f64) {
@@ -200,6 +222,67 @@ mod tests {
         assert_eq!(a, b);
         assert!(a.contains("runs: 8 (seed 7)"));
         assert!(a.contains("impact CEP_m:"));
+    }
+
+    /// A slow-starting motor lets the vehicle sag below the pad before thrust
+    /// exceeds its weight; at the default 0.05 s cadence that first sample used
+    /// to count as the impact and every statistic came out zero.
+    const SLOW_START: &str = "--curve 0:0,0.05:2.6,0.3:30,1.6:8,1.65:0 \
+                              --dry-mass 0.12 --propellant-mass 0.021";
+
+    /// First number after `key` on its line: "apogee_m: mean 492.59, sd 3.79"
+    /// gives 492.59, "range_m: 300.00" gives 300.0.
+    fn stat(out: &str, key: &str) -> f64 {
+        out.lines()
+            .find(|l| l.starts_with(key))
+            .and_then(|l| {
+                l.split_whitespace()
+                    .skip(1)
+                    .find_map(|v| v.trim_end_matches(',').parse().ok())
+            })
+            .unwrap_or_else(|| panic!("no {key} in {out}"))
+    }
+
+    #[test]
+    fn dispersion_ignores_pad_sag_before_liftoff() {
+        let out =
+            dispersion(&argv(&format!("dispersion {SLOW_START} --duration-s 60 --runs 4"))[1..])
+                .unwrap();
+        assert!(stat(&out, "apogee_m:") > 100.0, "got {out}");
+        assert!(!out.contains("warning"), "got {out}");
+    }
+
+    #[test]
+    fn dispersion_warns_when_runs_have_not_landed() {
+        let out =
+            dispersion(&argv(&format!("dispersion {SLOW_START} --duration-s 5 --runs 4"))[1..])
+                .unwrap();
+        assert!(stat(&out, "apogee_m:") > 100.0, "got {out}");
+        assert!(out.contains("4 of 4 runs had not landed"), "got {out}");
+    }
+
+    #[test]
+    fn dispersion_rejects_a_vehicle_that_never_leaves_the_ground() {
+        let err = dispersion(
+            &argv(
+                "dispersion --curve 0:0,1:0.5 --dry-mass 0.3 --propellant-mass 0.01 \
+                 --duration-s 2 --runs 2",
+            )[1..],
+        )
+        .unwrap_err();
+        assert!(err.contains("never left the ground"), "got {err}");
+    }
+
+    #[test]
+    fn solve_range_ignores_pad_sag_before_liftoff() {
+        // High-angle branch: both bracket ends (45° and 89.5°) lift off.
+        let out = solve_range(
+            &argv(&format!(
+                "solve-range 300 {SLOW_START} --high-angle --duration-s 60"
+            ))[1..],
+        )
+        .unwrap();
+        assert!((stat(&out, "range_m:") - 300.0).abs() < 0.5, "got {out}");
     }
 
     #[test]

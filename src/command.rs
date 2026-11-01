@@ -1307,8 +1307,9 @@ fn wind_field_arc(
 
 /// Assemble the rocket, environment and guidance chain, then integrate.
 /// Returns the sampled rows and the internal RK4 substep count.
-/// `stop_at_impact` ends the run at the first sample after t = 0 at or below the ground
-/// ([`Ground`]): the plane Y = `--ground-altitude-m`, Y being altitude above sea level, or
+/// `stop_at_impact` ends the run at the first sample at or below the ground after the
+/// vehicle has been above it ([`Ground`]): the plane Y = `--ground-altitude-m`, Y being
+/// altitude above sea level, or
 /// under central gravity the sphere of radius `--radius-m` + that altitude about `--center`.
 pub(crate) fn run_trajectory(
     opts: &Options,
@@ -1756,6 +1757,10 @@ pub(crate) fn run_trajectory(
         })
     };
     rows.push(sample(&state)?);
+    // Nothing holds the vehicle on the pad, so before thrust exceeds its weight
+    // it can sag a few millimetres below the ground. Only a crossing after it
+    // has been above the ground is an impact, the same rule impact_row uses.
+    let mut airborne = opts.ground.height_m(state.position_m) > 0.0;
     while state.time_s < duration - 1e-12 {
         let step = opts.dt_s.min(duration - state.time_s);
         let result = sim
@@ -1764,7 +1769,9 @@ pub(crate) fn run_trajectory(
         substeps += result.substeps;
         state = result.state;
         rows.push(sample(&state)?);
-        if stop_at_impact && state.time_s > 0.0 && opts.ground.height_m(state.position_m) <= 0.0 {
+        let height = opts.ground.height_m(state.position_m);
+        airborne |= height > 0.0;
+        if stop_at_impact && airborne && height <= 0.0 {
             break;
         }
     }
