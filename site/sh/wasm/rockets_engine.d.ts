@@ -6,6 +6,13 @@ export class Calculator {
   [Symbol.dispose](): void;
   setAltitude(altitude_ft: number): Calculator;
   setDiameter(diameter_inches: number): Calculator;
+  /**
+   * Relative humidity, a PERCENT from 0 to 100; a sensor reading up to 5 outside the range
+   * is read as 0 or 100. Anything farther out, or not finite, is refused here, by the
+   * engine's one validator, and the refusal names this method:
+   * `setHumidity = 150: relative humidity must be a percent from 0 to 100 (...)` (before
+   * 0.50.0 it surfaced later, from `calculateTrajectory`, naming a terminal flag).
+   */
   setHumidity(humidity: number): Calculator;
   setPressure(pressure_inhg: number): Calculator;
   setVelocity(velocity_fps: number): Calculator;
@@ -200,7 +207,7 @@ export interface InitOutput {
   readonly calculator_setBoreHeight: (a: number, b: number) => number;
   readonly calculator_setDiameter: (a: number, b: number) => number;
   readonly calculator_setDragModel: (a: number, b: number, c: number) => number;
-  readonly calculator_setHumidity: (a: number, b: number) => number;
+  readonly calculator_setHumidity: (a: number, b: number) => [number, number, number];
   readonly calculator_setMass: (a: number, b: number) => number;
   readonly calculator_setMaxRange: (a: number, b: number) => number;
   readonly calculator_setPressure: (a: number, b: number) => number;

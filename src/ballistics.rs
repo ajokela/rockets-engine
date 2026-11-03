@@ -1,4 +1,4 @@
-//! Adapter to ballistics-engine 0.48's public derivative kernel.
+//! Adapter to ballistics-engine 0.50's public derivative kernel.
 //!
 //! Uses the body's own Cd-versus-Mach curve, fixed diameter, standard gravity and
 //! a level world frame. SI mass and its imperial mirror are updated at every stage,
@@ -9,21 +9,21 @@
 
 use crate::{finite_vec, positive, Error, FlightState, ForceModel, Result, Vec3};
 use ballistics_engine::{
-    atmosphere::{
-        calculate_air_density_cimp, get_local_atmosphere, reduce_qnh_to_station_pressure, AtmoSock,
-    },
+    air_at,
+    atmosphere::{reduce_qnh_to_station_pressure, AtmoSock},
     constants::GRAINS_TO_KG,
     derivatives::compute_derivatives,
     drag::DragTable,
     wind::{WindSegment, WindSock},
-    BallisticInputs,
+    BallisticInputs, KernelAtmosphere, RelativeHumidity, StationAir,
 };
 
 /// Atmospheric inputs supported by the upstream derivative kernel.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Atmosphere {
     /// Station measurements; the upstream model applies its local altitude lapse.
-    /// Humidity affects station density; this derivative path uses dry-air sound speed.
+    /// Humidity sets the station's density and sound speed, and the water-vapour
+    /// fraction it implies is held at every altitude (upstream 0.50's `air_at`).
     Standard {
         /// Elevation of the weather station above sea level, in metres.
         station_altitude_m: f64,
@@ -35,7 +35,8 @@ pub enum Atmosphere {
         humidity_percent: f64,
     },
     /// Constant density and sound speed, independent of position.
-    /// Upstream's direct-mode sentinel requires 0 <= density < 2 and sound speed > 200.
+    /// Upstream requires 0 <= density < 2 and sound speed > 200; a density of
+    /// exactly zero is an exact vacuum.
     Uniform {
         /// Air density in kilograms per cubic metre; zero disables drag.
         density_kg_m3: f64,
@@ -44,13 +45,19 @@ pub enum Atmosphere {
     },
 }
 
+/// The relative humidity [`Atmosphere::default`] flies, in percent: the
+/// engine's own default ([`ballistics_engine::DEFAULT_HUMIDITY_PERCENT`]).
+pub const DEFAULT_HUMIDITY_PERCENT: f64 = ballistics_engine::DEFAULT_HUMIDITY_PERCENT;
+
 impl Default for Atmosphere {
+    /// The ICAO sea-level station (15 degC, 1013.25 hPa) at the engine's default
+    /// relative humidity, 50 %. [`Atmosphere::icao_standard`] stays dry.
     fn default() -> Self {
         Self::Standard {
             station_altitude_m: 0.0,
             temperature_c: 15.0,
             pressure_hpa: 1013.25,
-            humidity_percent: 0.0,
+            humidity_percent: DEFAULT_HUMIDITY_PERCENT,
         }
     }
 }
@@ -70,7 +77,7 @@ impl Atmosphere {
     /// site at elevation E flies through standard air with its station (and
     /// any atmosphere zones, which are readings at the station) at E.
     ///
-    /// At 0 m this equals [`Atmosphere::default`] exactly. The altitude must
+    /// At 0 m this is [`Atmosphere::default`] with its humidity set to 0 %. The altitude must
     /// be finite and within the troposphere, -1000 to 11000 m. Temperature
     /// follows the ICAO lapse of 6.5 K per kilometre of geopotential height;
     /// pressure is upstream's `reduce_qnh_to_station_pressure` of the
@@ -94,7 +101,9 @@ impl Atmosphere {
         })
     }
 
-    pub(crate) fn parameters(self) -> Result<(f64, f64, f64, f64)> {
+    /// The kernel's atmosphere, validated: station air with its humidity, or the
+    /// uniform direct-mode air (density 0 is an exact vacuum).
+    pub(crate) fn kernel(self) -> Result<KernelAtmosphere> {
         match self {
             Self::Standard {
                 station_altitude_m,
@@ -111,11 +120,13 @@ impl Atmosphere {
                     return Err(Error::invalid("standard atmosphere", "requires finite altitude, temperature above absolute zero and humidity in [0, 100]"));
                 }
                 positive(pressure_hpa, "pressure_hpa")?;
-                let ratio =
-                    calculate_air_density_cimp(temperature_c, pressure_hpa, humidity_percent)
-                        / 1.225;
-                positive(ratio, "station density ratio")?;
-                Ok((station_altitude_m, temperature_c, pressure_hpa, ratio))
+                let humidity = RelativeHumidity::try_percent(humidity_percent)
+                    .map_err(|e| Error::Model(e.to_string()))?;
+                let station =
+                    StationAir::new(station_altitude_m, temperature_c, pressure_hpa, humidity)
+                        .map_err(|e| Error::Model(e.to_string()))?;
+                positive(station.density_ratio(), "station density ratio")?;
+                Ok(KernelAtmosphere::Station(station))
             }
             Self::Uniform {
                 density_kg_m3,
@@ -131,27 +142,9 @@ impl Atmosphere {
                         "upstream requires density in [0, 2) and sound speed > 200 m/s",
                     ));
                 }
-                Ok((density_kg_m3, speed_of_sound_mps, 0.0, 0.0))
+                KernelAtmosphere::uniform(density_kg_m3, speed_of_sound_mps)
+                    .map_err(|e| Error::Model(e.to_string()))
             }
-        }
-    }
-}
-
-/// Local air density (kg/m³) and sound speed (m/s) for an atmosphere and its
-/// kernel parameter tuple, at a geometric altitude above sea level.
-fn local_air(
-    atmosphere: Atmosphere,
-    atmos_params: (f64, f64, f64, f64),
-    altitude_m: f64,
-) -> (f64, f64) {
-    match atmosphere {
-        Atmosphere::Standard { .. } => {
-            let (base_alt, temp_c, press_hpa, ratio) = atmos_params;
-            get_local_atmosphere(altitude_m, base_alt, temp_c, press_hpa, ratio)
-        }
-        Atmosphere::Uniform { .. } => {
-            let (density, speed_of_sound, _, _) = atmos_params;
-            (density, speed_of_sound)
         }
     }
 }
@@ -160,19 +153,19 @@ fn local_air(
 /// every force reads, so drag, body lift, recovery drag and the weathercock all
 /// see the same air.
 ///
-/// [`Air::at`] reproduces the upstream 0.48.0 `compute_derivatives` lookup that
-/// the drag kernel runs on the same atmosphere tuple and zone ladder.
+/// [`Air::at`] is upstream's `air_at`, the one per-step lookup the drag kernel
+/// runs on the same [`KernelAtmosphere`] and zone ladder.
 #[derive(Debug, Clone)]
 pub(crate) struct Air {
     atmosphere: Atmosphere,
-    params: (f64, f64, f64, f64),
+    kernel: KernelAtmosphere,
     zones: Option<AtmoSock>,
 }
 
 impl Air {
     pub(crate) fn new(atmosphere: Atmosphere) -> Result<Self> {
         Ok(Self {
-            params: atmosphere.parameters()?,
+            kernel: atmosphere.kernel()?,
             atmosphere,
             zones: None,
         })
@@ -209,13 +202,24 @@ impl Air {
                 ));
             }
         }
-        self.zones = Some(AtmoSock::new(zones));
+        let sock = AtmoSock::new(zones);
+        sock.validate().map_err(|e| Error::Model(e.to_string()))?;
+        self.zones = Some(sock);
         Ok(self)
     }
 
-    /// The kernel's atmosphere tuple.
-    pub(crate) fn params(&self) -> (f64, f64, f64, f64) {
-        self.params
+    /// The kernel's atmosphere.
+    pub(crate) fn kernel_atmosphere(&self) -> &KernelAtmosphere {
+        &self.kernel
+    }
+
+    /// Altitude of the kernel's station above sea level, m: the origin the
+    /// kernel measures a point's height from. Uniform air has no station.
+    pub(crate) fn station_altitude_m(&self) -> f64 {
+        match &self.kernel {
+            KernelAtmosphere::Station(station) => station.altitude_m(),
+            _ => 0.0,
+        }
     }
 
     /// The zone ladder handed to the kernel, if any.
@@ -226,24 +230,18 @@ impl Air {
     /// Air density (kg/m³) and sound speed (m/s) at a world position, with Y
     /// the altitude above sea level and X the downrange distance.
     ///
-    /// As upstream does: a `Uniform` atmosphere returns its constants. A
-    /// `Standard` one lapses its station reading from the station altitude to
-    /// Y; with zones, the zone selected by X (`AtmoSock::atmo_for_range`)
-    /// replaces the station temperature and pressure, and its density ratio
-    /// (CIPM density at the zone's temperature, pressure and humidity, over
-    /// 1.225) replaces the station's, before that same lapse. Density matches
-    /// the kernel's bit for bit. Sound speed is `get_local_atmosphere`'s
-    /// dry-air value, as these forces have always used; the kernel's own
-    /// moist formula at zero humidity agrees with it to about 4e-7.
+    /// This is upstream's `air_at` on the same kernel atmosphere and zones the
+    /// drag kernel flies, so density and sound speed both follow the station's
+    /// (or the selected zone's) humidity, and a `Uniform` atmosphere returns
+    /// its constants.
     pub(crate) fn at(&self, position_m: Vec3) -> (f64, f64) {
-        match (self.atmosphere, &self.zones) {
-            (Atmosphere::Standard { .. }, Some(sock)) => {
-                let (temp_c, pressure_hpa, humidity) = sock.atmo_for_range(position_m.x);
-                let ratio = calculate_air_density_cimp(temp_c, pressure_hpa, humidity) / 1.225;
-                get_local_atmosphere(position_m.y, self.params.0, temp_c, pressure_hpa, ratio)
-            }
-            _ => local_air(self.atmosphere, self.params, position_m.y),
-        }
+        let air = air_at(
+            &self.kernel,
+            self.zones.as_ref(),
+            position_m.x,
+            position_m.y,
+        );
+        (air.density_kg_m3, air.speed_of_sound_mps)
     }
 }
 
@@ -561,8 +559,8 @@ impl BallisticForces {
     /// Each zone is a reading taken at the station altitude: the zone selected
     /// by downrange distance `position.x` replaces the station reading, and the
     /// lapse from the station altitude to Y applies on top. The base atmosphere
-    /// must be [`Atmosphere::Standard`], and each zone's humidity applies to its
-    /// station density while this derivative path uses dry-air sound speed.
+    /// must be [`Atmosphere::Standard`], and each zone's humidity sets its
+    /// density and sound speed alike.
     /// Drag, spin and body lift all read the zoned air; give
     /// [`crate::RecoveryForces`] and [`crate::Weathercock`] the same ladder
     /// through their own `with_atmosphere_zones`.
@@ -718,12 +716,19 @@ impl BallisticForces {
         inputs.bullet_mass = mass_kg;
         inputs.weight_grains = mass_kg / GRAINS_TO_KG;
         positive(inputs.weight_grains, "mass in grains")?;
+        // The kernel measures height from its station: the state's Y is an
+        // altitude above sea level, so the pad altitude comes off before the call.
+        let position = Vec3::new(
+            state.position_m.x,
+            state.position_m.y - self.air.station_altitude_m(),
+            state.position_m.z,
+        );
         let derivatives = compute_derivatives(
-            state.position_m,
+            position,
             state.velocity_mps,
             &inputs,
             wind_mps,
-            self.air.params(),
+            self.air.kernel_atmosphere(),
             inputs.bc_value,
             self.omega_rps,
             state.time_s,
@@ -816,16 +821,17 @@ mod tests {
     ];
 
     #[test]
-    fn air_without_zones_is_the_station_lapse() {
-        // Byte-identical to what recovery, the weathercock and body lift read
-        // before the shared lookup: get_local_atmosphere from the station.
+    fn air_without_zones_is_the_stations_humid_lapse() {
+        // The lookup every force reads is upstream's `air_at` on the kernel
+        // atmosphere, density and sound speed both.
         for atmosphere in [Atmosphere::default(), pad_station()] {
-            let (base_alt, temp_c, press_hpa, ratio) = atmosphere.parameters().unwrap();
+            let kernel = atmosphere.kernel().unwrap();
             let air = Air::new(atmosphere).unwrap();
             for (x, y) in POSITIONS {
+                let expected = air_at(&kernel, None, x, y);
                 assert_eq!(
                     air.at(Vec3::new(x, y, 7.0)),
-                    get_local_atmosphere(y, base_alt, temp_c, press_hpa, ratio)
+                    (expected.density_kg_m3, expected.speed_of_sound_mps)
                 );
             }
         }
@@ -835,6 +841,76 @@ mod tests {
         })
         .unwrap();
         assert_eq!(uniform.at(Vec3::new(10.0, 9000.0, 0.0)), (0.9, 330.0));
+    }
+
+    #[test]
+    fn the_default_atmosphere_is_the_engines_fifty_percent() {
+        assert_eq!(DEFAULT_HUMIDITY_PERCENT, 50.0);
+        assert_eq!(
+            Atmosphere::default(),
+            Atmosphere::Standard {
+                station_altitude_m: 0.0,
+                temperature_c: 15.0,
+                pressure_hpa: 1013.25,
+                humidity_percent: 50.0,
+            }
+        );
+    }
+
+    #[test]
+    fn humid_air_is_thinner_near_the_ground_and_carries_sound_faster_than_dry() {
+        let dry = Air::new(Atmosphere::icao_standard(0.0).unwrap()).unwrap();
+        let humid = Air::new(Atmosphere::default()).unwrap();
+        for y in [0.0, 3000.0, 10_000.0] {
+            let (rho_dry, c_dry) = dry.at(Vec3::new(0.0, y, 0.0));
+            let (rho_humid, c_humid) = humid.at(Vec3::new(0.0, y, 0.0));
+            // Upstream holds the vapour fraction aloft, where the lighter humid
+            // air also loses pressure more slowly: by 10 km it is the denser.
+            if y <= 3000.0 {
+                assert!(rho_humid < rho_dry, "density at {y} m");
+            }
+            assert!(c_humid > c_dry, "sound speed at {y} m");
+        }
+    }
+
+    #[test]
+    fn a_pad_above_sea_level_reads_its_air_at_the_pad() {
+        // The kernel measures height from its station, so the adapter shifts the
+        // state by the pad altitude: a rocket at the pad feels the pad's air
+        // (compared against a uniform atmosphere of exactly that air).
+        let cd = vec![(0.0, 0.4), (5.0, 0.4)];
+        let pad = pad_station();
+        let forces = BallisticForces::new(0.05, cd.clone(), pad, Vec3::zeros()).unwrap();
+        let state = FlightState {
+            time_s: 0.0,
+            position_m: Vec3::new(0.0, 1500.0, 0.0),
+            velocity_mps: Vec3::new(150.0, 40.0, 0.0),
+        };
+        let (density_kg_m3, speed_of_sound_mps) = Air::new(pad).unwrap().at(state.position_m);
+        let direct = BallisticForces::new(
+            0.05,
+            cd,
+            Atmosphere::Uniform {
+                density_kg_m3,
+                speed_of_sound_mps,
+            },
+            Vec3::zeros(),
+        )
+        .unwrap();
+        assert_eq!(
+            forces.acceleration_in_wind(&state, 0.3, Vec3::zeros()),
+            direct.acceleration_in_wind(&state, 0.3, Vec3::zeros())
+        );
+    }
+
+    #[test]
+    fn a_zero_density_uniform_atmosphere_is_an_exact_vacuum() {
+        let air = Air::new(Atmosphere::Uniform {
+            density_kg_m3: 0.0,
+            speed_of_sound_mps: 340.0,
+        })
+        .unwrap();
+        assert_eq!(air.at(Vec3::new(0.0, 5000.0, 0.0)), (0.0, 340.0));
     }
 
     #[test]
@@ -898,8 +974,26 @@ mod tests {
     }
 
     #[test]
-    fn icao_standard_at_sea_level_is_the_default() {
-        assert_eq!(Atmosphere::icao_standard(0.0), Ok(Atmosphere::default()));
+    fn icao_standard_at_sea_level_is_the_default_made_dry() {
+        let Atmosphere::Standard {
+            station_altitude_m,
+            temperature_c,
+            pressure_hpa,
+            humidity_percent,
+        } = Atmosphere::default()
+        else {
+            panic!("the default is a standard station");
+        };
+        assert_eq!(
+            Atmosphere::icao_standard(0.0),
+            Ok(Atmosphere::Standard {
+                station_altitude_m,
+                temperature_c,
+                pressure_hpa,
+                humidity_percent: 0.0,
+            })
+        );
+        assert_eq!(humidity_percent, DEFAULT_HUMIDITY_PERCENT);
     }
 
     #[test]
@@ -939,7 +1033,7 @@ mod tests {
         // altitude; density differs by the constant 2.5e-5 by which the
         // station's CIPM density departs from upstream's ideal-gas lapse.
         let pad = Air::new(Atmosphere::icao_standard(1500.0).unwrap()).unwrap();
-        let sea = Air::new(Atmosphere::default()).unwrap();
+        let sea = Air::new(Atmosphere::icao_standard(0.0).unwrap()).unwrap();
         for y in [0.0, 1500.0, 3000.0, 10_000.0, 15_000.0] {
             let (rho_pad, c_pad) = pad.at(Vec3::new(0.0, y, 0.0));
             let (rho_sea, c_sea) = sea.at(Vec3::new(0.0, y, 0.0));

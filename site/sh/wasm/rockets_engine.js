@@ -164,13 +164,21 @@ export class Calculator {
         return Calculator.__wrap(ret);
     }
     /**
+     * Relative humidity, a PERCENT from 0 to 100; a sensor reading up to 5 outside the range
+     * is read as 0 or 100. Anything farther out, or not finite, is refused here, by the
+     * engine's one validator, and the refusal names this method:
+     * `setHumidity = 150: relative humidity must be a percent from 0 to 100 (...)` (before
+     * 0.50.0 it surfaced later, from `calculateTrajectory`, naming a terminal flag).
      * @param {number} humidity
      * @returns {Calculator}
      */
     setHumidity(humidity) {
         const ptr = this.__destroy_into_raw();
         const ret = wasm.calculator_setHumidity(ptr, humidity);
-        return Calculator.__wrap(ret);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return Calculator.__wrap(ret[0]);
     }
     /**
      * @param {number} pressure_inhg

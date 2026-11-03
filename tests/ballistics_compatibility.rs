@@ -1,12 +1,11 @@
 #![cfg(feature = "ballistics")]
 
 use ballistics_engine::{
-    atmosphere::calculate_air_density_cimp,
     constants::G_ACCEL_MPS2,
     drag::DragTable,
     trajectory_integration::{try_integrate_trajectory, TrajectoryParams},
     wind::{wind_vector, WindSegment},
-    DragModel,
+    DragModel, KernelAtmosphere, RelativeHumidity, StationAir,
 };
 use rockets_engine::{
     ballistics::{Atmosphere, BallisticForces},
@@ -34,7 +33,7 @@ fn state() -> FlightState {
 fn reference_params(
     mass: f64,
     diameter: f64,
-    atmos_params: (f64, f64, f64, f64),
+    atmosphere: KernelAtmosphere,
     wind_segments: Vec<WindSegment>,
 ) -> TrajectoryParams {
     let (mach, cd) = deck().into_iter().unzip();
@@ -43,7 +42,7 @@ fn reference_params(
         bc: 0.5,
         drag_model: DragModel::G1,
         wind_segments,
-        atmos_params,
+        atmosphere,
         omega_vector: None,
         enable_spin_drift: false,
         enable_magnus: false,
@@ -77,13 +76,13 @@ fn unpowered_flight_matches_upstream_rk4_across_drag_wind_and_atmospheres() {
     ];
     for (mass, diameter, wind_kmh, angle_deg, updraft, station_altitude) in scenarios {
         for uniform in [true, false] {
-            let (atmosphere, params) = if uniform {
+            let (atmosphere, kernel) = if uniform {
                 (
                     Atmosphere::Uniform {
                         density_kg_m3: 1.1,
                         speed_of_sound_mps: 340.0,
                     },
-                    (1.1, 340.0, 0.0, 0.0),
+                    KernelAtmosphere::uniform(1.1, 340.0).unwrap(),
                 )
             } else {
                 (
@@ -93,11 +92,14 @@ fn unpowered_flight_matches_upstream_rk4_across_drag_wind_and_atmospheres() {
                         pressure_hpa: 950.0,
                         humidity_percent: 60.0,
                     },
-                    (
-                        station_altitude,
-                        12.0,
-                        950.0,
-                        calculate_air_density_cimp(12.0, 950.0, 60.0) / 1.225,
+                    KernelAtmosphere::Station(
+                        StationAir::new(
+                            station_altitude,
+                            12.0,
+                            950.0,
+                            RelativeHumidity::try_percent(60.0).unwrap(),
+                        )
+                        .unwrap(),
                     ),
                 )
             };
@@ -120,14 +122,15 @@ fn unpowered_flight_matches_upstream_rk4_across_drag_wind_and_atmospheres() {
             )
             .unwrap();
             let mut initial = state();
-            // Upstream raw integration treats Y as relative to atmos_params.0;
-            // our adapter accepts absolute altitude. Direct mode ignores altitude.
-            let altitude_origin = if uniform { params.0 } else { station_altitude };
+            // Upstream raw integration treats Y as the height above the kernel
+            // atmosphere's station; our adapter accepts absolute altitude. Direct
+            // mode has no station and ignores altitude.
+            let altitude_origin = if uniform { 0.0 } else { station_altitude };
             initial.position_m.y += altitude_origin;
             let upstream = try_integrate_trajectory(
                 [0.0, 20.0, 0.0, 150.0, 90.0, 3.0],
                 (0.0, 2.0),
-                reference_params(mass, diameter, params, vec![segment]),
+                reference_params(mass, diameter, kernel, vec![segment]),
                 "RK4",
                 1e-9,
                 0.001,

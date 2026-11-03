@@ -1,7 +1,7 @@
 #![cfg(feature = "ballistics")]
 
 use rockets_engine::{
-    ballistics::{Atmosphere, BallisticForces},
+    ballistics::{Atmosphere, BallisticForces, DEFAULT_HUMIDITY_PERCENT as RH},
     FlightState, Vec3,
 };
 
@@ -40,10 +40,11 @@ fn zones_require_standard_atmosphere() {
 
 #[test]
 fn low_pressure_zone_halves_the_drag() {
-    // Same temperature and humidity, half the station pressure → half the
-    // station density ratio → drag halves; sound speed (dry air) is unchanged.
+    // Same temperature and humidity (the default atmosphere's), half the
+    // station pressure → half the station density → drag halves; the sound
+    // speed, which does not depend on pressure, is unchanged.
     let zoned = forces()
-        .with_atmosphere_zones(vec![(15.0, 506.625, 0.0, 10_000.0)])
+        .with_atmosphere_zones(vec![(15.0, 506.625, RH, 10_000.0)])
         .unwrap();
     let base = forces();
     let state = state_at(0.0);
@@ -57,10 +58,11 @@ fn low_pressure_zone_halves_the_drag() {
         .unwrap()
         - g;
     let ratio = drag_zoned.norm() / drag_base.norm();
-    // Not exactly 0.5: the CIPM compressibility factor varies slightly with
-    // pressure, so half pressure is ~0.4999 density, not exactly 0.5.
+    // Not exactly 0.5: the CIPM compressibility factor varies with pressure,
+    // and more so in humid air: half the pressure is 0.4977 of the density
+    // at the default 50 % humidity, not exactly 0.5.
     assert!(
-        (ratio - 0.5).abs() < 2e-3,
+        (ratio - 0.5).abs() < 5e-3,
         "expected half drag, ratio {ratio} ({drag_zoned:?} vs {drag_base:?})"
     );
 }
@@ -69,8 +71,8 @@ fn low_pressure_zone_halves_the_drag() {
 fn zones_switch_by_downrange_distance() {
     let zoned = forces()
         .with_atmosphere_zones(vec![
-            (15.0, 1013.25, 0.0, 100.0),
-            (15.0, 506.625, 0.0, 10_000.0),
+            (15.0, 1013.25, RH, 100.0),
+            (15.0, 506.625, RH, 10_000.0),
         ])
         .unwrap();
     let base = forces();
@@ -88,7 +90,7 @@ fn zones_switch_by_downrange_distance() {
     let far_base = drag_at(&base, 500.0);
     let far_zoned = drag_at(&zoned, 500.0);
     let ratio = far_zoned.norm() / far_base.norm();
-    assert!((ratio - 0.5).abs() < 2e-3, "far-zone ratio {ratio}");
+    assert!((ratio - 0.5).abs() < 5e-3, "far-zone ratio {ratio}");
 }
 
 #[test]
