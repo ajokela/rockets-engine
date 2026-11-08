@@ -100,5 +100,5 @@ Any change to drag/Cnα/CP must be re-validated against OpenRocket:
 
 ## Dependency pins (verify before publishing)
 
-- `ballistics-engine = "=0.50.0"` — kernel, keep exact.
+- `ballistics-engine = "=0.50.1"` — kernel, keep exact.
 - `winds-engine = "=0.N.0"` with `features = ["grib"]` — keep exact.

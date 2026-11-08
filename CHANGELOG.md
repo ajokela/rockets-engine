@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.21.1] - 2026-11-08
+
+Moves to ballistics-engine 0.50.1 (`=0.50.1`). 0.50.1 changes no physics: it builds `ndarray-npy`
+without npz support, so `zip` and its critical security advisories leave the dependency tree,
+along with the crates only it pulled in (`flate2`, `zopfli`, `zlib-rs`, `crc32fast`,
+`simd-adler32`). Every flight is 0.21.0's to the bit.
+
+### Dependencies
+- `ballistics-engine` `=0.50.0` becomes `=0.50.1`. `winds-engine` stays `=0.9.3` (it requires
+  `^0.50`, so one engine copy).
+
+### Tests
+- The two weather_zones half-pressure tests assert the drag ratio the model computes, 0.4977097
+  at the default 50 % humidity, to 1e-12, in place of 0.5 within 5e-3.
+
+### Documentation
+- The 0.21.0 entry below misexplained that ratio as the compressibility factor; it now gives
+  the cause.
+
 ## [0.21.0] - 2026-11-03
 
 Moves to ballistics-engine 0.50.0 (`=0.50.0`) and winds-engine 0.9.3 (`=0.9.3`). A minor bump,
@@ -59,5 +78,10 @@ fraction model gives. Command: a throwaway `examples/` driver, run with
   an error under `-D warnings`).
 - Tests: the default-humidity, dry-ICAO, humid-sound-speed and pad-altitude cases are new; the
   zone tests name the default's humidity for a zone meant to mirror the base, and their
-  half-pressure tolerance widens from 2e-3 to 5e-3 because the humid compressibility factor
-  varies more with pressure (the measured ratio is 0.4977).
+  half-pressure tolerance widens from 2e-3 to 5e-3 because the drag ratio is 0.4977, not
+  about 0.5. Halving the pressure at the same temperature and 50 % humidity doubles the
+  water-vapour mole fraction (0.0084 to 0.0169). Vapour is lighter than dry air, so the density
+  falls below half (ratio 0.4983222), and the humid air carries sound faster, so the Mach number
+  drops and Cd falls (x0.9987709): 0.4977097 in all, against dry air's 0.4998983 (the
+  compressibility factor alone). Corrected in 0.21.1; this note first blamed the compressibility
+  factor.
